@@ -27,6 +27,15 @@ TMDB_API_KEY=… CINIVA_MEDIA=/path/to/dump CINIVA_DATA=./data cargo run --relea
 | `CINIVA_TOKEN` | – | If set, required as `Authorization: Bearer` or `?token=` |
 | `CINIVA_LANGUAGE` | `en-US` | TMDB metadata language |
 | `CINIVA_SCAN_INTERVAL` | `15` | Minutes between rescans |
+| `CINIVA_WEB` | `/web` in Docker | Folder with the web UI (`web/`); unset serves the API only |
+
+## Web UI
+
+`web/` is a dependency-free single-page app (plain ES modules plus a vendored hls.js), served by the server at `/`. It covers browsing, search, playback and fixing unmatched files.
+
+- Plays files directly when the browser supports the container and codecs; otherwise it asks the server for a GPU transcode over HLS (HEVC when the browser decodes it, H.264 otherwise; HDR kept on HDR displays, tone-mapped elsewhere).
+- Audio track, text subtitles (extracted to WebVTT on first use), quality, resume, seek thumbnails, up next.
+- Keys: space play/pause, ←/→ 10 s, ⇧ 30 s, ⌘/Ctrl+⇧ 1 min, ↑/↓ volume, F full screen, M mute, Esc back.
 
 ## Docker
 

@@ -29,6 +29,8 @@ pub struct MovieHit {
     pub original_title: Option<String>,
     pub release_date: Option<String>,
     pub popularity: Option<f64>,
+    pub poster_path: Option<String>,
+    pub overview: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,6 +40,8 @@ pub struct TvHit {
     pub original_name: Option<String>,
     pub first_air_date: Option<String>,
     pub popularity: Option<f64>,
+    pub poster_path: Option<String>,
+    pub overview: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

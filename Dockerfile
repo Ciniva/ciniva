@@ -25,8 +25,10 @@ RUN groupadd --gid ${GID} ciniva \
  && { find / -xdev -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true; }
 COPY --from=build /src/target/release/ciniva /usr/local/bin/ciniva
 COPY --from=build /src/target/release/examples/hwinfo /usr/local/bin/ciniva-hwinfo
+COPY web /web
 ENV CINIVA_MEDIA=/media \
     CINIVA_DATA=/data \
+    CINIVA_WEB=/web \
     CINIVA_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg \
     CINIVA_FFPROBE=/usr/lib/jellyfin-ffmpeg/ffprobe \
     NVIDIA_VISIBLE_DEVICES=all \

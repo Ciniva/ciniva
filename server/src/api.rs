@@ -68,6 +68,7 @@ pub fn router(ctx: Shared) -> Router {
         .route("/transcode/{sid}", axum::routing::delete(transcode_stop))
         .route("/files/{id}/trickplay", get(trickplay_manifest))
         .route("/files/{id}/trickplay/{sheet}", get(trickplay_sheet))
+        .route("/files/{id}/subtitles/{track}", get(subtitle))
         .layer(middleware::from_fn_with_state(ctx.clone(), auth));
 
     let mut app = Router::new().nest("/api", api).with_state(ctx.clone());
@@ -451,11 +452,11 @@ async fn tmdb_search(State(ctx): State<Shared>, Query(q): Query<TmdbSearchQuery>
     let tmdb = ctx.tmdb.as_ref().ok_or_else(|| ApiError(StatusCode::SERVICE_UNAVAILABLE, "TMDB_API_KEY not set".into()))?;
     let value = if q.kind == "movie" {
         serde_json::to_value(tmdb.search_movie(&q.q, q.year).await?.into_iter().take(10).map(|s| s.hit).map(|h| {
-            serde_json::json!({ "id": h.id, "title": h.title, "year": crate::tmdb::year_of(&h.release_date) })
+            serde_json::json!({ "id": h.id, "title": h.title, "original_title": h.original_title, "year": crate::tmdb::year_of(&h.release_date), "poster_path": h.poster_path, "overview": h.overview })
         }).collect::<Vec<_>>())?
     } else {
         serde_json::to_value(tmdb.search_tv(&q.q, q.year).await?.into_iter().take(10).map(|s| s.hit).map(|h| {
-            serde_json::json!({ "id": h.id, "title": h.name, "year": crate::tmdb::year_of(&h.first_air_date) })
+            serde_json::json!({ "id": h.id, "title": h.name, "original_title": h.original_name, "year": crate::tmdb::year_of(&h.first_air_date), "poster_path": h.poster_path, "overview": h.overview })
         }).collect::<Vec<_>>())?
     };
     Ok(Json(value))
@@ -664,4 +665,47 @@ async fn trickplay_sheet(State(ctx): State<Shared>, Path((id, sheet)): Path<(i64
     let path = crate::transcode::trickplay::dir(&ctx.cfg.data_dir, id).join(format!("{n}.jpg"));
     let bytes = tokio::fs::read(&path).await.map_err(|_| not_found())?;
     Ok(([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "public, max-age=86400")], bytes).into_response())
+}
+
+const TEXT_SUBS: &[&str] = &["subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"];
+static SUBTITLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn subtitle(State(ctx): State<Shared>, Path((id, track)): Path<(i64, String)>) -> Result<Response, ApiError> {
+    let index: i64 = track.strip_suffix(".vtt").and_then(|n| n.parse().ok()).ok_or_else(not_found)?;
+    let (path, probe): (String, Option<SqlJson<MediaInfo>>) =
+        sqlx::query_as("SELECT path, probe FROM files WHERE id = ?").bind(id).fetch_optional(&ctx.db).await?.ok_or_else(not_found)?;
+    let subs = probe.map(|p| p.0.subtitles).unwrap_or_default();
+    let sub = subs.iter().find(|s| s.index == index).ok_or_else(not_found)?;
+    if !TEXT_SUBS.contains(&sub.codec.as_str()) {
+        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, format!("{} subtitles are images and cannot be converted to text", sub.codec)));
+    }
+    let dir = ctx.cfg.data_dir.join("subtitles");
+    let vtt = |i: i64| dir.join(format!("{id}-{i}.vtt"));
+    if !vtt(index).exists() {
+        let _guard = SUBTITLE_LOCK.lock().await;
+        if !vtt(index).exists() {
+            // Extracting means reading the whole file, so pull every text track out in a single pass.
+            tokio::fs::create_dir_all(&dir).await?;
+            let tracks: Vec<i64> = subs.iter().filter(|s| TEXT_SUBS.contains(&s.codec.as_str())).map(|s| s.index).collect();
+            let tmp = |i: i64| dir.join(format!(".{id}-{i}.vtt.tmp"));
+            let mut cmd = tokio::process::Command::new(&ctx.cfg.ffmpeg);
+            cmd.args(["-v", "error", "-nostdin", "-y", "-i"]).arg(&path);
+            for &i in &tracks {
+                cmd.args(["-map", &format!("0:{i}"), "-c:s", "webvtt", "-f", "webvtt"]).arg(tmp(i));
+            }
+            let out = cmd.output().await?;
+            for &i in &tracks {
+                if out.status.success() {
+                    let _ = tokio::fs::rename(tmp(i), vtt(i)).await;
+                } else {
+                    let _ = tokio::fs::remove_file(tmp(i)).await;
+                }
+            }
+            if !out.status.success() {
+                return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, String::from_utf8_lossy(&out.stderr).trim().to_string()));
+            }
+        }
+    }
+    let bytes = tokio::fs::read(vtt(index)).await?;
+    Ok(([(header::CONTENT_TYPE, "text/vtt; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], bytes).into_response())
 }

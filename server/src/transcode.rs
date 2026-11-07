@@ -28,6 +28,8 @@ pub struct Request {
     pub audio_stream: Option<i64>,
     #[serde(default = "default_channels")]
     pub audio_channels: u32,
+    /// Comma-separated audio codecs the client plays as-is; others are re-encoded to AAC.
+    pub audio_copy: Option<String>,
 }
 
 fn default_height() -> u32 {
@@ -467,7 +469,11 @@ impl Session {
             .audio_stream
             .and_then(|i| self.media.audio.iter().find(|s| s.index == i))
             .or_else(|| self.media.audio.first());
-        let copy_audio = source_audio.is_some_and(|s| matches!(s.codec.as_str(), "aac" | "ac3" | "eac3") && s.channels.unwrap_or(2) as u32 <= req.audio_channels.max(2));
+        let copyable = |c: &str| match req.audio_copy.as_deref() {
+            Some(list) => list.split(',').any(|x| x.trim() == c),
+            None => matches!(c, "aac" | "ac3" | "eac3"),
+        };
+        let copy_audio = source_audio.is_some_and(|s| copyable(&s.codec) && s.channels.unwrap_or(2) as u32 <= req.audio_channels.max(2));
         if copy_audio {
             a.extend(["-c:a".into(), "copy".into()]);
         } else {
