@@ -171,11 +171,21 @@ async fn scan_inner(ctx: &Arc<Ctx>) -> Result<ScanReport> {
 
     let paths: Vec<PathBuf> = found.iter().map(|(p, ..)| p.clone()).collect();
     let guesses = parser::parse_batch(&paths);
+    let mut disc_main: HashMap<&std::path::Path, (&PathBuf, i64)> = HashMap::new();
+    for (path, size, _) in &found {
+        if let Some(root) = parser::disc_root(path) {
+            let e = disc_main.entry(root).or_insert((path, *size));
+            if *size > e.1 {
+                *e = (path, *size);
+            }
+        }
+    }
+    let is_disc_extra = |path: &PathBuf| parser::disc_root(path).is_some_and(|root| disc_main.get(root).is_some_and(|(main, _)| *main != path));
     let mut tx = ctx.db.begin().await?;
     for ((path, size, mtime), guess) in found.iter().zip(&guesses) {
         let key = path.to_string_lossy().into_owned();
         let guess_json = serde_json::to_string(guess)?;
-        let kind = if parser::is_extra(path) { "extra" } else { "pending" };
+        let kind = if parser::is_extra(path) || is_disc_extra(path) { "extra" } else { "pending" };
         match existing.get(&key) {
             None => {
                 sqlx::query("INSERT INTO files (path, size, mtime, guess, kind) VALUES (?, ?, ?, ?, ?)")

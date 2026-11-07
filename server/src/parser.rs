@@ -46,7 +46,25 @@ pub fn is_video(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Blu-ray folders keep the video at `<Name>/BDMV/STREAM/00000.m2ts`; the disc folder carries the name,
+/// so parse as if the file were `<Name>.m2ts`.
+pub fn disc_path(path: &Path) -> std::path::PathBuf {
+    let root = path.ancestors().skip(1).find(|a| a.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case("BDMV")));
+    match root.and_then(|bdmv| Some((bdmv.parent()?, bdmv.parent()?.file_name()?.to_str()?))) {
+        Some((disc, name)) => disc.parent().unwrap_or(Path::new("")).join(format!("{name}.m2ts")),
+        None => path.to_path_buf(),
+    }
+}
+
+pub fn disc_root(path: &Path) -> Option<&Path> {
+    path.ancestors()
+        .skip(1)
+        .find(|a| a.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case("BDMV")))
+        .and_then(|b| b.parent())
+}
+
 pub fn is_extra(path: &Path) -> bool {
+    let path = &disc_path(path);
     const DIRS: &[&str] = &[
         "extras", "extra", "featurettes", "trailers", "samples", "sample", "behind the scenes",
         "deleted scenes", "interviews", "bonus", "shorts", "other",
@@ -171,6 +189,7 @@ pub fn dir_title(name: &str) -> Option<(String, Option<i32>)> {
 /// Alternative titles to try on TMDB when the primary title finds nothing:
 /// `aka` parts, text before ` - `, per-script parts of mixed-script names, and parent folder titles.
 pub fn title_variants(primary: &str, path: &Path) -> Vec<String> {
+    let path = &disc_path(path);
     let mut out: Vec<String> = vec![primary.to_string()];
     let mut push = |t: &str| {
         let t = t.trim();
@@ -243,6 +262,7 @@ fn finish_episode(path: &Path, prefix: &str, season: Option<u32>, episodes: Vec<
 
 /// Guess what a file is from its name, falling back to parent folders for context.
 pub fn parse(path: &Path) -> Guess {
+    let path = &disc_path(path);
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
     let name = stem.replace('_', " ");
 
@@ -302,6 +322,8 @@ pub fn parse(path: &Path) -> Guess {
 /// differ only by a trailing or leading number are episodes of the same show.
 pub fn parse_batch(paths: &[std::path::PathBuf]) -> Vec<Guess> {
     use std::collections::HashMap;
+    let paths: Vec<std::path::PathBuf> = paths.iter().map(|p| disc_path(p)).collect();
+    let paths = &paths[..];
     let mut guesses: Vec<Guess> = paths.iter().map(|p| parse(p)).collect();
 
     let mut trailing: HashMap<String, Vec<(usize, String, u32)>> = HashMap::new();
@@ -341,6 +363,7 @@ pub fn parse_batch(paths: &[std::path::PathBuf]) -> Vec<Guess> {
 
 /// Episode title written after the episode marker, e.g. `Show.S04E35.Toward.the.Tree.on.That.Hill.1080p`.
 pub fn episode_title(path: &Path) -> Option<String> {
+    let path = &disc_path(path);
     let stem = path.file_stem()?.to_str()?.replace('_', " ");
     let rest = SXXEXX
         .find(&stem)
@@ -516,5 +539,18 @@ mod tests {
         assert_eq!(normalize("Love, Death & Robots"), "love death and robots");
         assert_eq!(normalize("Rin-Daughter"), "rin daughter");
         assert_eq!(normalize("Clarkson's Farm"), "clarksons farm");
+    }
+
+    #[test]
+    fn bluray_folders() {
+        let p = Path::new("/media/TV/THE.VAMPIRE.DIARIES.S02.2009.BD-REMUX/The.Vampire.Diaries.S02.E01.BDRemux.3xRus.Ukr.Eng.HDCLUB/BDMV/STREAM/00000.m2ts");
+        assert_eq!(
+            parse(p),
+            Guess::Episode { show: "The Vampire Diaries".into(), year: None, season: Some(2), episodes: vec![1] }
+        );
+        let m = Path::new("/media/Movies/Dune.Part.Two.2024.BluRay/BDMV/STREAM/00003.m2ts");
+        assert_eq!(parse(m), Guess::Movie { title: "Dune Part Two".into(), year: Some(2024) });
+        let batch = parse_batch(&[p.to_path_buf(), Path::new("/media/TV/THE.VAMPIRE.DIARIES.S02.2009.BD-REMUX/The.Vampire.Diaries.S02.E02.BDRemux.3xRus.Ukr.Eng.HDCLUB/BDMV/STREAM/00000.m2ts").to_path_buf()]);
+        assert!(matches!(&batch[1], Guess::Episode { season: Some(2), episodes, .. } if episodes == &vec![2]));
     }
 }

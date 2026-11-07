@@ -84,12 +84,18 @@ export function bytes(n) {
   return `${n.toFixed(i >= 3 ? 1 : 0)} ${u[i]}`;
 }
 
+function discSplit(path) {
+  const parts = path.split('/');
+  const i = parts.findIndex((p) => p.toUpperCase() === 'BDMV');
+  return i > 0 ? { dir: parts.slice(0, i - 1).join('/'), name: `${parts[i - 1]} (${parts[parts.length - 1]})` } : null;
+}
+
 export function fileName(path) {
-  return path.split('/').pop();
+  return discSplit(path)?.name ?? path.split('/').pop();
 }
 
 export function dirName(path) {
-  return path.split('/').slice(0, -1).join('/');
+  return discSplit(path)?.dir ?? path.split('/').slice(0, -1).join('/');
 }
 
 export function progressBar(fraction) {
