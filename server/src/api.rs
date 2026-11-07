@@ -74,7 +74,10 @@ pub fn router(ctx: Shared) -> Router {
     let mut app = Router::new().nest("/api", api).with_state(ctx.clone());
     if let Some(web) = ctx.cfg.web_dir.clone() {
         let index = web.join("index.html");
-        app = app.fallback_service(tower_http::services::ServeDir::new(web).fallback(ServeFile::new(index)));
+        let files = tower::ServiceBuilder::new()
+            .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(header::CACHE_CONTROL, HeaderValue::from_static("no-cache")))
+            .service(tower_http::services::ServeDir::new(web).fallback(ServeFile::new(index)));
+        app = app.fallback_service(files);
     }
     app.layer(tower_http::cors::CorsLayer::permissive())
         .layer(tower_http::trace::TraceLayer::new_for_http())
