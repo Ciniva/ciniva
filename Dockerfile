@@ -17,6 +17,12 @@ RUN apt-get update \
  && apt-get update \
  && apt-get install -y --no-install-recommends ${FFMPEG_PKG} \
  && apt-get purge -y gnupg && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+ARG UID=1000
+ARG GID=1000
+RUN groupadd --gid ${GID} ciniva \
+ && useradd --uid ${UID} --gid ${GID} --no-create-home --home-dir /data --shell /usr/sbin/nologin ciniva \
+ && install -d -o ciniva -g ciniva -m 0750 /data \
+ && { find / -xdev -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true; }
 COPY --from=build /src/target/release/ciniva /usr/local/bin/ciniva
 COPY --from=build /src/target/release/examples/hwinfo /usr/local/bin/ciniva-hwinfo
 ENV CINIVA_MEDIA=/media \
@@ -25,6 +31,7 @@ ENV CINIVA_MEDIA=/media \
     CINIVA_FFPROBE=/usr/lib/jellyfin-ffmpeg/ffprobe \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+USER ciniva:ciniva
 VOLUME ["/data"]
 EXPOSE 8484
 ENTRYPOINT ["/usr/local/bin/ciniva"]

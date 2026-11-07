@@ -1,7 +1,11 @@
 services:
   ciniva:
     image: ghcr.io/ciniva/ciniva:latest
-    build: .
+    build:
+      context: .
+      args:
+        UID: "${CINIVA_UID:-1000}"
+        GID: "${CINIVA_GID:-1000}"
     container_name: ciniva
     restart: unless-stopped
     ports:
@@ -12,7 +16,16 @@ services:
     volumes:
       - ./data:/data
       - /path/to/your/dump:/media:ro
+    # Never root: unprivileged user, no capabilities, no privilege escalation, read-only image.
+    user: "${CINIVA_UID:-1000}:${CINIVA_GID:-1000}"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
     # Intel / AMD (integrated or discrete): VA-API and Quick Sync.
+    # RENDER_GID is the numeric group of /dev/dri/renderD* on the host: stat -c %g /dev/dri/renderD128
     devices:
       - /dev/dri:/dev/dri
     group_add:

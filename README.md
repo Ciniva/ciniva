@@ -27,3 +27,23 @@ TMDB_API_KEY=… CINIVA_MEDIA=/path/to/dump CINIVA_DATA=./data cargo run --relea
 | `CINIVA_TOKEN` | – | If set, required as `Authorization: Bearer` or `?token=` |
 | `CINIVA_LANGUAGE` | `en-US` | TMDB metadata language |
 | `CINIVA_SCAN_INTERVAL` | `15` | Minutes between rescans |
+
+## Docker
+
+```sh
+cp docker-compose.yml docker-compose.override.yml   # set your media path
+echo "RENDER_GID=$(stat -c %g /dev/dri/renderD128)" >> .env
+docker compose up -d
+```
+
+The container never runs as root: it runs as an unprivileged user (UID/GID 1000 by default,
+`CINIVA_UID`/`CINIVA_GID` to change), with every Linux capability dropped, `no-new-privileges`,
+a read-only root filesystem and no setuid binaries in the image. Media is mounted read-only;
+only `/data` is writable.
+
+For a further layer, enable Docker user-namespace remapping (`"userns-remap": "default"` in
+`/etc/docker/daemon.json`) so even the container's UID maps to an unused range on the host.
+This applies to every container on the host, so it is not enabled by the compose file.
+
+GPU access: Intel/AMD need `/dev/dri` and the host's render group (`RENDER_GID`); NVIDIA needs
+the NVIDIA Container Toolkit. `docker exec ciniva ciniva-hwinfo` lists what was detected.
