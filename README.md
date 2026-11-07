@@ -34,6 +34,7 @@ TMDB_API_KEY=… CINIVA_MEDIA=/path/to/dump CINIVA_DATA=./data cargo run --relea
 `web/` is a dependency-free single-page app (plain ES modules plus a vendored hls.js), served by the server at `/`. It covers browsing, search, playback and fixing unmatched files.
 
 - Plays files directly when the browser supports the container and codecs; otherwise it asks the server for a GPU transcode over HLS (HEVC when the browser decodes it, H.264 otherwise; HDR kept on HDR displays, tone-mapped elsewhere).
+- H.264 in containers browsers can't open (MKV, AVI, TS) is remuxed at Original quality: the video is copied untouched into HLS, cut on its own keyframes. Keyframes are indexed once per file (in the background thumbnail pass, or on first play, which transcodes that one time).
 - Audio track, text subtitles (extracted to WebVTT on first use), quality, resume, seek thumbnails, up next.
 - Keys: space play/pause, ←/→ 10 s, ⇧ 30 s, ⌘/Ctrl+⇧ 1 min, ↑/↓ volume, F full screen, M mute, Esc back.
 

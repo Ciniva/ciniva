@@ -178,6 +178,12 @@ impl Hardware {
 
     /// Least-loaded device that can encode `target`, preferring one that can also decode `source`
     /// and, when HDR must become SDR, one that tone maps on the GPU.
+    pub fn cpu_lease(&self) -> Lease {
+        let device = self.software();
+        device.active.fetch_add(1, Ordering::Relaxed);
+        Lease { device, hw_decode: false }
+    }
+
     pub fn acquire(&self, source: Option<DecodeCodec>, target: EncodeCodec, purpose: Purpose, tonemap: bool) -> Lease {
         let kind_rank = |d: &Device| match (purpose, d.kind) {
             (_, GpuKind::Cpu) => 9,

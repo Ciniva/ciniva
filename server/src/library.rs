@@ -24,6 +24,7 @@ pub struct Ctx {
     pub cfg: Config,
     pub hw: Arc<Hardware>,
     pub transcoder: Arc<Transcoder>,
+    pub keyframes: Arc<crate::transcode::Keyframes>,
     scan_lock: Mutex<()>,
     trickplay_lock: Mutex<()>,
     pub status: RwLock<ScanStatus>,
@@ -64,13 +65,15 @@ const SEQUEL_MIN: f64 = 0.92;
 impl Ctx {
     pub fn new(db: SqlitePool, cfg: Config, hw: Arc<Hardware>) -> Arc<Self> {
         let tmdb = cfg.tmdb_key.clone().map(|k| Tmdb::new(k, cfg.language.clone()));
-        let transcoder = Transcoder::new(hw.clone(), cfg.data_dir.join("transcode"));
+        let keyframes = crate::transcode::Keyframes::new(cfg.ffprobe.clone(), cfg.data_dir.join("keyframes"));
+        let transcoder = Transcoder::new(hw.clone(), cfg.data_dir.join("transcode"), keyframes.clone());
         Arc::new(Self {
             db,
             tmdb,
             cfg,
             hw,
             transcoder,
+            keyframes,
             scan_lock: Mutex::new(()),
             trickplay_lock: Mutex::new(()),
             status: Default::default(),
@@ -137,6 +140,12 @@ pub async fn trickplay_pass(ctx: &Arc<Ctx>) {
         Err(e) => return tracing::warn!("trickplay query failed: {e:#}"),
     };
     for (id, path, media) in files {
+        let video = media.video.as_ref();
+        if video.is_some_and(|v| v.codec == "h264" && v.bit_depth.unwrap_or(8) <= 8 && v.hdr.is_none()) {
+            if let Err(e) = ctx.keyframes.extract(id, std::path::Path::new(&path)).await {
+                tracing::warn!(path, "keyframe index failed: {e:#}");
+            }
+        }
         if trickplay::dir(&ctx.cfg.data_dir, id).join("manifest.json").exists() {
             continue;
         }

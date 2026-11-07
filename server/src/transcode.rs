@@ -30,6 +30,8 @@ pub struct Request {
     pub audio_channels: u32,
     /// Comma-separated audio codecs the client plays as-is; others are re-encoded to AAC.
     pub audio_copy: Option<String>,
+    /// Comma-separated video codecs the client decodes; a matching source at full size is remuxed, not re-encoded.
+    pub video_copy: Option<String>,
 }
 
 fn default_height() -> u32 {
@@ -62,6 +64,7 @@ pub struct Plan {
     pub tonemap: Option<&'static str>,
     pub width_limit: u32,
     pub hdr_out: bool,
+    pub remux: bool,
 }
 
 struct Running {
@@ -75,6 +78,7 @@ pub struct Session {
     input: PathBuf,
     dir: PathBuf,
     duration: f64,
+    bounds: Vec<f64>,
     request: Request,
     media: MediaInfo,
     lease: Lease,
@@ -90,6 +94,7 @@ pub struct Session {
 pub struct Transcoder {
     hw: Arc<Hardware>,
     root: PathBuf,
+    keyframes: Arc<Keyframes>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     filters: Arc<std::collections::HashSet<String>>,
 }
@@ -108,10 +113,10 @@ fn is_hdr(media: &MediaInfo) -> bool {
 }
 
 impl Transcoder {
-    pub fn new(hw: Arc<Hardware>, root: PathBuf) -> Arc<Self> {
+    pub fn new(hw: Arc<Hardware>, root: PathBuf, keyframes: Arc<Keyframes>) -> Arc<Self> {
         let _ = std::fs::remove_dir_all(&root);
         let filters = Arc::new(hw.filters.clone());
-        let t = Arc::new(Self { hw, root, sessions: Mutex::new(HashMap::new()), filters });
+        let t = Arc::new(Self { hw, root, keyframes, sessions: Mutex::new(HashMap::new()), filters });
         let reaper = t.clone();
         tokio::spawn(async move {
             loop {
@@ -161,6 +166,31 @@ impl Transcoder {
 
     pub async fn start(&self, file_id: i64, input: PathBuf, media: MediaInfo, request: Request) -> Result<Arc<Session>> {
         let Some(duration) = media.duration.filter(|d| *d > 0.0) else { bail!("unknown duration; probe the file first") };
+        let remux = if remuxable(&media, &request) {
+            match self.keyframes.cached(file_id, &input).await {
+                Some(kf) => Some(segment_bounds(&kf, duration)).filter(|b| b.len() > 1 || duration <= SEGMENT_SECS * 4.0),
+                None => {
+                    self.keyframes.spawn(file_id, input.clone());
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(bounds) = remux {
+            let plan = Plan {
+                device: "Remux (video copied)".into(),
+                codec: TargetCodec::H264,
+                container: "mpegts",
+                hw_decode: false,
+                encoder: "copy",
+                tonemap: None,
+                width_limit: request.max_height,
+                hdr_out: false,
+                remux: true,
+            };
+            return self.register(file_id, input, media, request, duration, bounds, self.hw.cpu_lease(), plan).await;
+        }
         let video = media.video.clone().unwrap_or_default();
         let source = DecodeCodec::from_probe(&video.codec, video.bit_depth);
         let hdr_source = is_hdr(&media);
@@ -208,7 +238,25 @@ impl Transcoder {
             tonemap,
             width_limit: request.max_height,
             hdr_out,
+            remux: false,
         };
+        let bounds = (0..(duration / SEGMENT_SECS).ceil() as u64).map(|i| i as f64 * SEGMENT_SECS).collect();
+        self.register(file_id, input, media, request, duration, bounds, lease, plan).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn register(
+        &self,
+        file_id: i64,
+        input: PathBuf,
+        media: MediaInfo,
+        request: Request,
+        duration: f64,
+        bounds: Vec<f64>,
+        lease: Lease,
+        plan: Plan,
+    ) -> Result<Arc<Session>> {
+        let hdr_source = is_hdr(&media);
         let id = format!("{:016x}", rand_id());
         let dir = self.root.join(&id);
         tokio::fs::create_dir_all(&dir).await?;
@@ -218,6 +266,7 @@ impl Transcoder {
             input,
             dir,
             duration,
+            bounds,
             request,
             media,
             lease,
@@ -235,6 +284,99 @@ impl Transcoder {
     }
 }
 
+fn remuxable(media: &MediaInfo, req: &Request) -> bool {
+    let Some(v) = &media.video else { return false };
+    let accepts = req.video_copy.as_deref().is_some_and(|l| l.split(',').any(|c| c.trim() == "h264"));
+    accepts && v.codec == "h264" && v.bit_depth.unwrap_or(8) <= 8 && v.height as u32 <= req.max_height && !is_hdr(media)
+}
+
+/// Segment starts on source keyframes, each at least `SEGMENT_SECS` long.
+pub fn segment_bounds(keyframes: &[f64], duration: f64) -> Vec<f64> {
+    let mut out = vec![0.0];
+    for &k in keyframes {
+        if k >= out[out.len() - 1] + SEGMENT_SECS && duration - k >= 1.0 {
+            out.push(k);
+        }
+    }
+    out
+}
+
+/// Video keyframe times per file, read once with ffprobe (it scans the whole file) and cached on disk.
+pub struct Keyframes {
+    ffprobe: String,
+    dir: PathBuf,
+    busy: std::sync::Mutex<std::collections::HashSet<i64>>,
+}
+
+impl Keyframes {
+    pub fn new(ffprobe: String, dir: PathBuf) -> Arc<Self> {
+        Arc::new(Self { ffprobe, dir, busy: Default::default() })
+    }
+
+    fn cache_path(&self, file_id: i64, input: &std::path::Path) -> Option<PathBuf> {
+        let meta = std::fs::metadata(input).ok()?;
+        let mtime = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+        Some(self.dir.join(format!("{file_id}-{}-{mtime}.json", meta.len())))
+    }
+
+    pub async fn cached(&self, file_id: i64, input: &std::path::Path) -> Option<Vec<f64>> {
+        let bytes = tokio::fs::read(self.cache_path(file_id, input)?).await.ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    pub async fn extract(&self, file_id: i64, input: &std::path::Path) -> Result<Vec<f64>> {
+        if let Some(k) = self.cached(file_id, input).await {
+            return Ok(k);
+        }
+        let out = tokio::process::Command::new(&self.ffprobe)
+            .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0"])
+            .arg(input)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await?;
+        if !out.status.success() {
+            bail!("ffprobe: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        let mut k: Vec<f64> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let (t, flags) = l.split_once(',')?;
+                if flags.starts_with('K') { t.parse().ok() } else { None }
+            })
+            .collect();
+        k.sort_by(|a, b| a.total_cmp(b));
+        k.dedup();
+        let path = self.cache_path(file_id, input).ok_or_else(|| anyhow::anyhow!("cannot stat input"))?;
+        tokio::fs::create_dir_all(&self.dir).await?;
+        let prefix = format!("{file_id}-");
+        if let Ok(mut d) = tokio::fs::read_dir(&self.dir).await {
+            while let Ok(Some(e)) = d.next_entry().await {
+                if e.file_name().to_string_lossy().starts_with(&prefix) {
+                    let _ = tokio::fs::remove_file(e.path()).await;
+                }
+            }
+        }
+        tokio::fs::write(&path, serde_json::to_vec(&k)?).await?;
+        Ok(k)
+    }
+
+    /// Extract in the background unless that file is already being read.
+    pub fn spawn(self: &Arc<Self>, file_id: i64, input: PathBuf) {
+        if !self.busy.lock().unwrap().insert(file_id) {
+            return;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            let started = Instant::now();
+            match me.extract(file_id, &input).await {
+                Ok(k) => tracing::info!(file_id, keyframes = k.len(), secs = started.elapsed().as_secs_f32(), "keyframes indexed"),
+                Err(e) => tracing::warn!(file_id, "keyframe index failed: {e:#}"),
+            }
+            me.busy.lock().unwrap().remove(&file_id);
+        });
+    }
+}
+
 fn rand_id() -> u64 {
     use std::hash::{BuildHasher, Hasher};
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
@@ -244,7 +386,35 @@ fn rand_id() -> u64 {
 
 impl Session {
     pub fn segment_count(&self) -> u64 {
-        (self.duration / SEGMENT_SECS).ceil() as u64
+        self.bounds.len() as u64
+    }
+
+    fn segment_len(&self, i: usize) -> f64 {
+        self.bounds.get(i + 1).copied().unwrap_or(self.duration) - self.bounds[i]
+    }
+
+    /// A segment is complete once ffmpeg lists it: hls runs write via temp files, segment-muxer runs record a list.
+    async fn ready(&self, n: u64) -> bool {
+        let path = self.segment_path(n);
+        if !self.plan.remux {
+            return path.exists();
+        }
+        if !path.exists() {
+            return false;
+        }
+        let name = format!("{n}.ts");
+        let Ok(mut dir) = tokio::fs::read_dir(&self.dir).await else { return false };
+        while let Ok(Some(e)) = dir.next_entry().await {
+            if !e.file_name().to_string_lossy().ends_with(".csv") {
+                continue;
+            }
+            if let Ok(list) = tokio::fs::read_to_string(e.path()).await {
+                if list.lines().any(|l| l.split(',').next().is_some_and(|f| f == name || f.ends_with(&format!("/{name}")))) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn fmp4(&self) -> bool {
@@ -259,15 +429,14 @@ impl Session {
         let mut out = format!(
             "#EXTM3U\n#EXT-X-VERSION:{}\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n",
             if self.fmp4() { 7 } else { 3 },
-            SEGMENT_SECS.ceil() as u64
+            (0..self.bounds.len()).map(|i| self.segment_len(i)).fold(SEGMENT_SECS, f64::max).ceil() as u64
         );
         if self.fmp4() {
             out.push_str(&format!("#EXT-X-MAP:URI=\"{prefix}init.mp4{query}\"\n"));
         }
         let ext = self.ext();
-        let n = self.segment_count();
-        for i in 0..n {
-            let len = if i + 1 == n { self.duration - i as f64 * SEGMENT_SECS } else { SEGMENT_SECS };
+        for i in 0..self.bounds.len() {
+            let len = self.segment_len(i);
             out.push_str(&format!("#EXTINF:{len:.3},\n{prefix}{i}.{ext}{query}\n"));
         }
         out.push_str("#EXT-X-ENDLIST\n");
@@ -321,7 +490,7 @@ impl Session {
         let path = self.segment_path(n);
         let deadline = Instant::now() + Duration::from_secs(45);
         loop {
-            if path.exists() {
+            if self.ready(n).await {
                 return Ok(path);
             }
             {
@@ -332,7 +501,7 @@ impl Session {
                         let exited = r.child.try_wait()?.is_some();
                         let produced = self.highest_from(r.start_segment);
                         let ahead = produced.map_or(r.start_segment, |p| p + 1);
-                        n < r.start_segment || n > ahead + 2 || (exited && !path.exists())
+                        n < r.start_segment || n > ahead + 2 || (exited && !self.ready(n).await)
                     }
                 };
                 if restart {
@@ -373,10 +542,68 @@ impl Session {
         Ok(Running { child, start_segment })
     }
 
+    fn audio_args(&self) -> Vec<String> {
+        let req = &self.request;
+        let mut a: Vec<String> = vec![];
+        match req.audio_stream {
+            Some(i) => a.extend(["-map".into(), format!("0:{i}")]),
+            None => a.extend(["-map".into(), "0:a:0?".into()]),
+        }
+        let source_audio = req
+            .audio_stream
+            .and_then(|i| self.media.audio.iter().find(|s| s.index == i))
+            .or_else(|| self.media.audio.first());
+        let copyable = |c: &str| match req.audio_copy.as_deref() {
+            Some(list) => list.split(',').any(|x| x.trim() == c),
+            None => matches!(c, "aac" | "ac3" | "eac3"),
+        };
+        if source_audio.is_some_and(|s| copyable(&s.codec) && s.channels.unwrap_or(2) as u32 <= req.audio_channels.max(2)) {
+            a.extend(["-c:a".into(), "copy".into()]);
+        } else {
+            let ch = req.audio_channels.clamp(1, 8);
+            a.extend(["-c:a".into(), "aac".into(), "-ac".into(), ch.to_string(), "-b:a".into(), format!("{}k", if ch > 2 { 384 } else { 192 })]);
+        }
+        a
+    }
+
+    /// Video copied untouched; cuts land on the source keyframes listed in `bounds`.
+    fn remux_args(&self, n: u64) -> Vec<String> {
+        let i = n as usize;
+        // ffmpeg seeks 3/23 s early when the stream has B-frames; aim past that so the seek lands on this
+        // keyframe. Timestamps are shifted by -ss, so offsetting by the same value restores source time.
+        let start = if i == 0 { 0.0 } else { self.bounds[i] + 0.2 };
+        let mut a: Vec<String> = vec!["-hide_banner".into(), "-nostdin".into(), "-v".into(), "warning".into(), "-y".into()];
+        a.extend(["-ss".into(), format!("{start:.6}"), "-i".into(), self.input.display().to_string()]);
+        a.extend(["-map".into(), "0:v:0".into(), "-c:v".into(), "copy".into()]);
+        a.extend(self.audio_args());
+        a.extend(["-sn".into(), "-dn".into(), "-map_metadata".into(), "-1".into(), "-map_chapters".into(), "-1".into()]);
+        a.extend(["-output_ts_offset".into(), format!("{start:.6}")]);
+        // The first run would otherwise be shifted by the B-frame delay and not line up with restarted runs.
+        a.extend(["-avoid_negative_ts".into(), "disabled".into()]);
+        a.extend(["-f".into(), "segment".into(), "-segment_format".into(), "mpegts".into()]);
+        // Cut times are compared before the output offset is applied, so they are relative to `start`.
+        let times: Vec<String> = self.bounds[i + 1..].iter().map(|t| format!("{:.3}", t - start)).collect();
+        if !times.is_empty() {
+            a.extend(["-segment_times".into(), times.join(","), "-segment_time_delta".into(), "0.05".into()]);
+        } else {
+            a.extend(["-segment_time".into(), "100000".into()]);
+        }
+        a.extend([
+            "-segment_start_number".into(), n.to_string(),
+            "-segment_list".into(), self.dir.join(format!("run-{n}.csv")).display().to_string(),
+            "-segment_list_type".into(), "csv".into(),
+            self.dir.join("%d.ts").display().to_string(),
+        ]);
+        a
+    }
+
     pub fn args(&self, start_segment: u64) -> Vec<String> {
+        if self.plan.remux {
+            return self.remux_args(start_segment);
+        }
         let d = &self.lease.device;
         let hw = self.lease.hw_decode;
-        let start = start_segment as f64 * SEGMENT_SECS;
+        let start = self.bounds[start_segment as usize];
         let req = &self.request;
         let gpu_tonemap = self.plan.tonemap == Some("gpu");
         let cpu_tonemap = self.plan.tonemap == Some("cpu");
@@ -432,10 +659,6 @@ impl Session {
         }
 
         a.extend(["-map".into(), "0:v:0".into()]);
-        match req.audio_stream {
-            Some(i) => a.extend(["-map".into(), format!("0:{i}")]),
-            None => a.extend(["-map".into(), "0:a:0?".into()]),
-        }
         a.extend(["-vf".into(), vf.join(",")]);
 
         let target = match req.codec {
@@ -465,21 +688,7 @@ impl Session {
         }
         a.extend(["-force_key_frames".into(), format!("expr:gte(t,n_forced*{SEGMENT_SECS})")]);
 
-        let source_audio = req
-            .audio_stream
-            .and_then(|i| self.media.audio.iter().find(|s| s.index == i))
-            .or_else(|| self.media.audio.first());
-        let copyable = |c: &str| match req.audio_copy.as_deref() {
-            Some(list) => list.split(',').any(|x| x.trim() == c),
-            None => matches!(c, "aac" | "ac3" | "eac3"),
-        };
-        let copy_audio = source_audio.is_some_and(|s| copyable(&s.codec) && s.channels.unwrap_or(2) as u32 <= req.audio_channels.max(2));
-        if copy_audio {
-            a.extend(["-c:a".into(), "copy".into()]);
-        } else {
-            let ch = req.audio_channels.clamp(1, 8);
-            a.extend(["-c:a".into(), "aac".into(), "-ac".into(), ch.to_string(), "-b:a".into(), format!("{}k", if ch > 2 { 384 } else { 192 })]);
-        }
+        a.extend(self.audio_args());
         a.extend(["-sn".into(), "-dn".into(), "-map_metadata".into(), "-1".into(), "-map_chapters".into(), "-1".into()]);
         a.extend(["-output_ts_offset".into(), format!("{start:.3}")]);
         if matches!(target, EncodeCodec::Hevc | EncodeCodec::Hevc10) {

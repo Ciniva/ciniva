@@ -16,6 +16,7 @@ const mse = (t) => { try { return !!window.MediaSource?.isTypeSupported(t); } ca
 const can = (t) => testVideo.canPlayType(t) !== '' || mse(t);
 const isApple = /Apple/.test(navigator.vendor);
 const caps = {
+  h264: can('video/mp4; codecs="avc1.640033"'),
   hevc: can('video/mp4; codecs="hvc1.1.6.L150.B0"'),
   hevc10: can('video/mp4; codecs="hvc1.2.4.L153.B0"'),
   ac3: can('audio/mp4; codecs="ac-3"'),
@@ -74,6 +75,7 @@ function transcodeRequest(file, quality, audio) {
     audio_stream: audio?.index ?? null,
     audio_channels: (audio?.channels || 2) >= 6 ? 6 : 2,
     audio_copy: ['aac', caps.ac3 && 'ac3', caps.eac3 && 'eac3'].filter(Boolean).join(','),
+    video_copy: quality === 'auto' && caps.h264 ? 'h264' : undefined,
   };
 }
 
@@ -171,6 +173,7 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
   function showInfo() {
     const parts = [];
     if (state.mode === 'direct') parts.push('Direct play');
+    else if (state.plan?.remux) parts.push('Direct stream · video untouched');
     else if (state.plan) {
       const p = state.plan;
       parts.push(`Transcode · ${p.codec.toUpperCase()} on ${p.device}`);
