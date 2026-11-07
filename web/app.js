@@ -1,6 +1,6 @@
 import { api, img, token, setToken, pref, setPref, AuthError } from './api.js';
 import { h, append, clear, icon, duration, bytes, fileName, progressBar, poster, movieCard, showCard, row, techBadges, toast, clock } from './dom.js';
-import { openPlayer } from './player.js';
+import { openPlayer, seekSteps, SEEK_DEFAULTS } from './player.js';
 import { fixView, matchDialog } from './fix.js';
 
 const app = document.getElementById('app');
@@ -175,13 +175,15 @@ const SORTS = [['title', 'Title'], ['added', 'Recently added'], ['year', 'Year']
 
 async function libraryView(el, kind, params) {
   const sort = params.get('sort') || pref(`sort.${kind}`, 'title');
-  const items = await api(`/${kind}?sort=${sort}`);
+  const [items, home] = await Promise.all([api(`/${kind}?sort=${sort}`), api('/home')]);
+  const resume = home.continue_watching.filter((c) => (kind === 'movies' ? c.movie_id : c.show_id));
   const select = h('select', {
     'aria-label': 'Sort',
     onchange: (e) => { setPref(`sort.${kind}`, e.target.value); location.hash = `#/${kind}?sort=${e.target.value}`; },
   }, SORTS.map(([v, l]) => h('option', { value: v, selected: v === sort }, l)));
   append(el, 
     h('div.page-head', h('h1', kind === 'movies' ? 'Movies' : 'Shows'), h('span.count', items.length), h('div.spacer'), select),
+    row('Continue watching', resume.map(continueCard)),
     items.length ? h('div.grid', items.map(kind === 'movies' ? movieCard : showCard)) : h('div.empty', h('p', 'Nothing here yet.')),
   );
 }
@@ -395,6 +397,18 @@ async function settingsView(el) {
       h('label.field', 'Default quality ',
         h('select', { onchange: (e) => setPref('quality', e.target.value) },
           [['auto', 'Original'], ['2160', '4K'], ['1080', '1080p'], ['720', '720p'], ['480', '480p']].map(([v, l]) => h('option', { value: v, selected: pref('quality', 'auto') === v }, l)))),
+      h('div.seek-steps',
+        [['short', '← → arrow'], ['medium', '⇧ + arrow'], ['long', '⌘/Ctrl ⇧ + arrow']].map(([k, label]) => [
+          h('label', { for: `seek-${k}` }, `Seek ${label} (seconds)`),
+          h('input', {
+            id: `seek-${k}`, type: 'number', min: 1, max: 3600, value: seekSteps()[k],
+            onchange: (e) => {
+              const v = Math.round(Number(e.target.value));
+              if (v >= 1) setPref(`seek.${k}`, v); else e.target.value = seekSteps()[k];
+            },
+          }),
+        ])),
+      h('button.btn.small', { onclick: () => { for (const k of Object.keys(SEEK_DEFAULTS)) setPref(`seek.${k}`, SEEK_DEFAULTS[k]); rerender(); } }, 'Reset seek steps'),
       h('p.muted', `Server ${status.version}`),
       h('button.btn', { onclick: () => { setToken(''); login(); } }, 'Sign out'),
     ),

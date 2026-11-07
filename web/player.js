@@ -77,6 +77,20 @@ function transcodeRequest(file, quality, audio) {
   };
 }
 
+export const SEEK_DEFAULTS = { short: 10, medium: 30, long: 60 };
+
+export function seekSteps() {
+  const read = (k) => Math.max(1, Number(pref(`seek.${k}`, SEEK_DEFAULTS[k])) || SEEK_DEFAULTS[k]);
+  return { short: read('short'), medium: read('medium'), long: read('long') };
+}
+
+function seekStep(e) {
+  const s = seekSteps();
+  if ((e.metaKey || e.ctrlKey) && e.shiftKey) return s.long;
+  if (e.shiftKey) return s.medium;
+  return s.short;
+}
+
 export async function openPlayer({ fileId, title, subtitle, startAt, next, reuseHistory }) {
   const file = await api(`/files/${fileId}`);
   if (!file.probe) {
@@ -415,7 +429,7 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
 
   function onKey(e) {
     if (e.target instanceof HTMLSelectElement || e.target instanceof HTMLInputElement) return;
-    const step = (e.metaKey || e.ctrlKey) && e.shiftKey ? 60 : e.shiftKey ? 30 : 10;
+    const step = seekStep(e);
     switch (e.key) {
       case ' ': case 'k': toggle(); break;
       case 'ArrowLeft': seekTo(video.currentTime - step); break;

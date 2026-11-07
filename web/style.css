@@ -64,8 +64,9 @@ ul.plain { list-style: none; padding: 0; margin: 6px 0 0; }
   border-radius: 9px; background: var(--accent); color: var(--accent-ink); font-size: 11px; font-weight: 700; line-height: 18px; text-align: center;
 }
 .search-box { display: flex; align-items: center; gap: 8px; padding: 0 12px; height: 36px; border-radius: 18px; background: var(--surface); color: var(--muted); width: clamp(140px, 22vw, 280px); }
-.search-box:focus-within { outline: 2px solid var(--accent); color: var(--text); }
-.search { background: none; border: 0; outline: 0; width: 100%; min-width: 0; }
+.search-box:focus-within { box-shadow: 0 0 0 2px var(--accent); color: var(--text); }
+.search-box input.search { background: none; border: 0; border-radius: 0; outline: 0; height: 100%; padding: 0; width: 100%; min-width: 0; -webkit-appearance: none; appearance: none; }
+.search-box input.search::-webkit-search-decoration { -webkit-appearance: none; }
 
 main { padding-bottom: 64px; transition: opacity .2s; }
 main.busy { opacity: .55; }
@@ -286,6 +287,9 @@ input.num { width: 64px; height: 32px; padding: 0 8px; }
 .upnext-actions { display: flex; gap: 8px; margin-top: 4px; }
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.search-box input.search:focus-visible { outline: none; }
+.seek-steps { display: grid; grid-template-columns: auto 90px; gap: 8px 14px; align-items: center; justify-content: start; }
+.seek-steps input { width: 90px; }
 
 @media (max-width: 760px) {
   .nav { gap: 14px; flex-wrap: wrap; }
