@@ -90,7 +90,7 @@ static JUNK: Lazy<Regex> = Lazy::new(|| {
             hdr10\+?|hdr|dv|dovi|dolby[ ._-]?vision|sdr|10bit|8bit|hlg|
             atmos|truehd|dts(?:-?hd)?(?:[ ._-]?ma)?|ddp?(?:5|7)?|eac3|ac3|aac|flac|opus|
             proper|repack|extended|unrated|uncut|directors[ ._-]?cut|imax|remastered|criterion|
-            multi|dual|subbed|dubbed|internal|limited|complete
+            multi|dual|subbed|dubbed|dub|internal|limited|complete
         )\b",
     )
     .unwrap()
@@ -158,12 +158,80 @@ fn show_from_dirs(path: &Path) -> Option<(String, Option<i32>)> {
     let mut dirs = path.parent()?.ancestors().filter_map(|p| p.file_name()?.to_str());
     let first = dirs.next()?;
     let name = if SEASON_DIR.is_match(first.trim()) { dirs.next()? } else { first };
-    let (t, y) = split_title_year(name);
+    dir_title(name)
+}
+
+/// Title (and year) a folder name refers to, cutting season-pack markers like `Show.S01-08.1080p`.
+pub fn dir_title(name: &str) -> Option<(String, Option<i32>)> {
+    let base = SEASON_PACK_DIR.captures(name).map(|c| c.get(1).unwrap().as_str()).filter(|b| !b.trim().is_empty()).unwrap_or(name);
+    let (t, y) = split_title_year(base);
     (!t.is_empty()).then_some((t, y))
+}
+
+/// Alternative titles to try on TMDB when the primary title finds nothing:
+/// `aka` parts, text before ` - `, per-script parts of mixed-script names, and parent folder titles.
+pub fn title_variants(primary: &str, path: &Path) -> Vec<String> {
+    let mut out: Vec<String> = vec![primary.to_string()];
+    let mut push = |t: &str| {
+        let t = t.trim();
+        if t.chars().filter(|c| c.is_alphanumeric()).count() >= 2 && !out.iter().any(|o| normalize(o) == normalize(t)) {
+            out.push(t.to_string());
+        }
+    };
+    let plain: String = primary.chars().map(|c| if c.is_alphanumeric() || c.is_whitespace() || c == '\'' { c } else { ' ' }).collect();
+    push(&plain.split_whitespace().collect::<Vec<_>>().join(" "));
+    let lower = primary.to_lowercase();
+    if let Some(i) = lower.find(" aka ") {
+        push(&primary[..i]);
+        push(&primary[i + 5..]);
+    }
+    if let Some((head, _)) = primary.split_once(" - ") {
+        push(head);
+    }
+    let words: Vec<&str> = primary.split_whitespace().collect();
+    let latin: Vec<&str> = words.iter().copied().filter(|w| w.chars().all(|c| c.is_ascii() )).collect();
+    let other: Vec<&str> = words.iter().copied().filter(|w| !w.chars().all(|c| c.is_ascii())).collect();
+    if !latin.is_empty() && !other.is_empty() {
+        push(&latin.join(" "));
+        push(&other.join(" "));
+    }
+    const GENERIC: &[&str] = &["tv", "movies", "movie", "shows", "series", "media", "share", "films", "anime", "dump", "downloads", "data", "storage"];
+    for dir in path.ancestors().skip(1).take(3).filter_map(|p| p.file_name()?.to_str()) {
+        if SEASON_DIR.is_match(dir.trim()) || GENERIC.contains(&dir.to_lowercase().as_str()) {
+            continue;
+        }
+        if let Some((t, _)) = dir_title(dir) {
+            push(&t);
+        }
+    }
+    out
+}
+
+static TITLE_SEASON: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)^(.*\S)\s+(?:(II|III|IV|V|VI|VII|VIII|IX|X)|(\d{1,2})(?:st|nd|rd|th)\s+season|season\s+(\d{1,2}))$").unwrap()
+});
+
+fn roman(s: &str) -> Option<u32> {
+    ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"].iter().position(|r| r.eq_ignore_ascii_case(s)).map(|p| p as u32)
+}
+
+/// Anime-style season in the title: `Show II`, `Show 2nd Season`, `Show Season 2`.
+fn split_title_season(show: &str) -> (String, Option<u32>) {
+    match TITLE_SEASON.captures(show) {
+        Some(c) => {
+            let n = c.get(2).and_then(|m| roman(m.as_str()))
+                .or_else(|| c.get(3).or(c.get(4)).and_then(|m| m.as_str().parse().ok()));
+            (c[1].trim().to_string(), n)
+        }
+        None => (show.to_string(), None),
+    }
 }
 
 fn finish_episode(path: &Path, prefix: &str, season: Option<u32>, episodes: Vec<u32>) -> Guess {
     let (mut show, mut year) = split_title_year(prefix);
+    let (base, title_season) = split_title_season(&show);
+    let season = season.or(title_season);
+    show = base;
     if show.is_empty() {
         if let Some((s, y)) = show_from_dirs(path) {
             show = s;
@@ -271,6 +339,18 @@ pub fn parse_batch(paths: &[std::path::PathBuf]) -> Vec<Guess> {
     guesses
 }
 
+/// Episode title written after the episode marker, e.g. `Show.S04E35.Toward.the.Tree.on.That.Hill.1080p`.
+pub fn episode_title(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?.replace('_', " ");
+    let rest = SXXEXX
+        .find(&stem)
+        .or_else(|| NXNN.find(&stem))
+        .or_else(|| LEADING_NUMBER.find(&stem).map(|m| regex::Regex::new(r"^\d+").unwrap().find(m.as_str()).unwrap()))
+        .map(|m| &stem[m.end()..])?;
+    let t = clean_title(rest.trim_start_matches(|c: char| c == '-' || c == '.' || c == ' '));
+    (t.chars().filter(|c| c.is_alphabetic()).count() >= 3).then_some(t)
+}
+
 fn looks_generic(title: &str) -> bool {
     let t = title.to_lowercase();
     t.len() < 3 || ["movie", "video", "film", "main", "feature"].contains(&t.as_str())
@@ -278,9 +358,10 @@ fn looks_generic(title: &str) -> bool {
 
 pub fn normalize(s: &str) -> String {
     s.to_lowercase()
-        .replace('&', "and")
+        .replace('&', " and ")
+        .replace(['\'', '’'], "")
         .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
         .collect::<String>()
         .split_whitespace()
         .filter(|w| !["the", "a", "an"].contains(w))
@@ -403,8 +484,37 @@ mod tests {
     }
 
     #[test]
+    fn anime_title_season() {
+        assert_eq!(
+            p("/a/Mushoku Tensei Isekai Ittara Honki Dasu II - 04 [BDRip 1080p].mkv"),
+            ep("Mushoku Tensei Isekai Ittara Honki Dasu", 2, &[4])
+        );
+        assert_eq!(p("/a/[Grp] Spy x Family Season 2 - 03.mkv"), ep("Spy x Family", 2, &[3]));
+        assert_eq!(p("/m/Rocky.II.1979.mkv"), movie("Rocky II", Some(1979)));
+    }
+
+    #[test]
+    fn episode_titles() {
+        assert_eq!(episode_title(Path::new("/t/S4E35 - Toward the Tree on That Hill.mp4")).as_deref(), Some("Toward the Tree on That Hill"));
+        assert_eq!(episode_title(Path::new("/t/Silo.S01E02.Holstons.Pick.2160p.WEB-DL.mkv")).as_deref(), Some("Holstons Pick"));
+        assert_eq!(episode_title(Path::new("/t/GOT.S07E06.BDRip.1080p.mkv")), None);
+    }
+
+    #[test]
+    fn variants() {
+        let v = title_variants("GOT", Path::new("/tv/Game.of.Thrones.S01-08.LostFilm.Dub.BDRip.1080p/GOT.S07/GOT.S07E06.mkv"));
+        assert!(v.contains(&"Game of Thrones".to_string()), "{v:?}");
+        let v = title_variants("Kingsman Секретная служба", Path::new("/m/x.mkv"));
+        assert!(v.contains(&"Kingsman".to_string()) && v.contains(&"Секретная служба".to_string()), "{v:?}");
+        let v = title_variants("Flow aka Straume", Path::new("/m/x.mkv"));
+        assert!(v.contains(&"Flow".to_string()), "{v:?}");
+    }
+
+    #[test]
     fn normalizes() {
         assert_eq!(normalize("The Lord of the Rings: The Return of the King"), "lord of rings return of king");
         assert_eq!(normalize("Love, Death & Robots"), "love death and robots");
+        assert_eq!(normalize("Rin-Daughter"), "rin daughter");
+        assert_eq!(normalize("Clarkson's Farm"), "clarksons farm");
     }
 }

@@ -2,7 +2,7 @@ use crate::{
     config::Config,
     parser::{self, Guess},
     probe,
-    tmdb::{TvDetails, Tmdb},
+    tmdb::{MovieHit, Scored, TvDetails, TvHit, Tmdb},
 };
 use anyhow::Result;
 use futures::StreamExt;
@@ -237,17 +237,67 @@ async fn match_file(ctx: &Ctx, id: i64, path: &str, guess: &str, duration: Optio
         Some((_, tmdb_id, Some(season), Some(episode))) => Resolution::Episodes { tv: tmdb_id, episodes: vec![(season, episode)] },
         _ => {
             let guess: Guess = serde_json::from_str(guess)?;
-            resolve(tmdb, &guess, duration).await?
+            resolve(tmdb, &guess, duration, std::path::Path::new(path)).await?
         }
     };
     apply(ctx, id, resolution).await
 }
 
-pub async fn resolve(tmdb: &Tmdb, guess: &Guess, duration: Option<f64>) -> Result<Resolution> {
+async fn best_movie(tmdb: &Tmdb, variants: &[String], year: Option<i32>) -> Result<Option<Scored<MovieHit>>> {
+    for v in variants {
+        if let Some(best) = tmdb.search_movie(v, year).await?.into_iter().next().filter(|m| m.score >= MOVIE_MIN) {
+            return Ok(Some(best));
+        }
+    }
+    Ok(None)
+}
+
+async fn best_tv(tmdb: &Tmdb, variants: &[String], year: Option<i32>) -> Result<Option<Scored<TvHit>>> {
+    for v in variants {
+        if let Some(best) = tmdb.search_tv(v, year).await?.into_iter().next().filter(|s| s.score >= TV_MIN) {
+            return Ok(Some(best));
+        }
+        if year.is_some() {
+            if let Some(best) = tmdb.search_tv(v, None).await?.into_iter().next().filter(|s| s.score >= TV_MIN) {
+                return Ok(Some(best));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// `Shrek 3` style names: the nth released film of the base title's TMDB collection, else an exact `Title N` film.
+async fn numbered_movie(tmdb: &Tmdb, base: &str, year: Option<i32>, n: u32) -> Result<Option<(i64, f64)>> {
+    if let Some(b) = tmdb.search_movie(base, None).await?.into_iter().next().filter(|m| m.score >= MOVIE_MIN) {
+        if let Some(c) = tmdb.movie(b.hit.id).await?.belongs_to_collection {
+            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            let mut parts: Vec<_> = tmdb
+                .collection(c.id)
+                .await?
+                .parts
+                .into_iter()
+                .filter(|p| p.release_date.as_deref().is_some_and(|d| !d.is_empty() && d <= today.as_str()))
+                .collect();
+            parts.sort_by(|a, b| a.release_date.cmp(&b.release_date));
+            if let Some(p) = n.checked_sub(1).and_then(|i| parts.get(i as usize)) {
+                return Ok(Some((p.id, b.score)));
+            }
+        }
+    }
+    Ok(tmdb
+        .search_movie(&format!("{base} {n}"), year)
+        .await?
+        .into_iter()
+        .next()
+        .filter(|m| m.score >= SEQUEL_MIN)
+        .map(|m| (m.hit.id, m.score)))
+}
+
+pub async fn resolve(tmdb: &Tmdb, guess: &Guess, duration: Option<f64>, path: &std::path::Path) -> Result<Resolution> {
+    let variants = parser::title_variants(guess.title(), path);
     match guess {
         Guess::Movie { title, year } => {
-            let movies = tmdb.search_movie(title, *year).await?;
-            if let Some(best) = movies.first().filter(|m| m.score >= MOVIE_MIN) {
+            if let Some(best) = best_movie(tmdb, &variants, *year).await? {
                 let details = tmdb.movie(best.hit.id).await?;
                 let too_short = match (duration, details.runtime) {
                     (Some(d), Some(rt)) if rt > 0 => d < rt as f64 * 60.0 * 0.5,
@@ -263,8 +313,7 @@ pub async fn resolve(tmdb: &Tmdb, guess: &Guess, duration: Option<f64>) -> Resul
                     details.runtime.unwrap_or(0)
                 )));
             }
-            let shows = tmdb.search_tv(title, *year).await?;
-            if let Some(s) = shows.first().filter(|s| s.score >= 0.9) {
+            if let Some(s) = best_tv(tmdb, &variants, *year).await?.filter(|s| s.score >= 0.9) {
                 return Ok(Resolution::Unmatched(format!(
                     "Looks like the show \"{}\" but the file name has no episode number",
                     s.hit.name
@@ -273,13 +322,11 @@ pub async fn resolve(tmdb: &Tmdb, guess: &Guess, duration: Option<f64>) -> Resul
             Ok(Resolution::Unmatched(format!("No TMDB match for \"{title}\"")))
         }
         Guess::Episode { show, year, season, episodes } => {
-            let shows = tmdb.search_tv(show, *year).await?;
-            let tv = shows.into_iter().next().filter(|s| s.score >= TV_MIN);
+            let tv = best_tv(tmdb, &variants, *year).await?;
             if season.is_none() && episodes.len() == 1 {
-                let movies = tmdb.search_movie(&format!("{show} {}", episodes[0]), *year).await?;
-                if let Some(m) = movies.first().filter(|m| m.score >= SEQUEL_MIN) {
-                    if tv.as_ref().is_none_or(|t| m.score > t.score) {
-                        return Ok(Resolution::Movie(m.hit.id));
+                if let Some((id, score)) = numbered_movie(tmdb, show, *year, episodes[0]).await? {
+                    if tv.as_ref().is_none_or(|t| score > t.score + 0.02) {
+                        return Ok(Resolution::Movie(id));
                     }
                 }
             }
@@ -287,11 +334,16 @@ pub async fn resolve(tmdb: &Tmdb, guess: &Guess, duration: Option<f64>) -> Resul
                 return Ok(Resolution::Unmatched(format!("No TMDB show matches \"{show}\"")));
             };
             let details = tmdb.tv(tv.hit.id).await?;
-            Ok(map_episodes(&details, *season, episodes))
+            let mapped = map_episodes(&details, *season, episodes);
+            if matches!(mapped, Resolution::Unmatched(_)) {
+                if let Some(found) = episode_by_title(tmdb, &details, path).await? {
+                    return Ok(found);
+                }
+            }
+            Ok(mapped)
         }
         Guess::DatedEpisode { show, date } => {
-            let shows = tmdb.search_tv(show, None).await?;
-            let Some(tv) = shows.into_iter().next().filter(|s| s.score >= TV_MIN) else {
+            let Some(tv) = best_tv(tmdb, &variants, None).await? else {
                 return Ok(Resolution::Unmatched(format!("No TMDB show matches \"{show}\"")));
             };
             let details = tmdb.tv(tv.hit.id).await?;
@@ -313,32 +365,71 @@ pub async fn resolve(tmdb: &Tmdb, guess: &Guess, duration: Option<f64>) -> Resul
     }
 }
 
-pub fn map_episodes(details: &TvDetails, season: Option<u32>, episodes: &[u32]) -> Resolution {
-    let tv = details.id;
-    if let Some(s) = season {
-        if let Some(info) = details.seasons.iter().find(|x| x.season_number == s as i64) {
-            let count = info.episode_count.unwrap_or(i64::MAX);
-            if episodes.iter().all(|&e| e >= 1 && (e as i64) <= count) {
-                return Resolution::Episodes { tv, episodes: episodes.iter().map(|&e| (s as i64, e as i64)).collect() };
+/// Fallback when numbering disagrees with TMDB: find the episode by the title in the file name, specials included.
+async fn episode_by_title(tmdb: &Tmdb, details: &TvDetails, path: &std::path::Path) -> Result<Option<Resolution>> {
+    let Some(title) = parser::episode_title(path) else { return Ok(None) };
+    let wanted = parser::normalize(&title);
+    let mut best: Option<(f64, i64, i64)> = None;
+    for s in &details.seasons {
+        let season = tmdb.season(details.id, s.season_number).await?;
+        for e in &season.episodes {
+            let Some(name) = &e.name else { continue };
+            let score = strsim::jaro_winkler(&wanted, &parser::normalize(name));
+            if score >= 0.93 && best.is_none_or(|b| score > b.0) {
+                best = Some((score, e.season_number, e.episode_number));
             }
         }
     }
+    Ok(best.map(|(_, s, e)| Resolution::Episodes { tv: details.id, episodes: vec![(s, e)] }))
+}
+
+pub fn map_episodes(details: &TvDetails, season: Option<u32>, episodes: &[u32]) -> Resolution {
+    let tv = details.id;
     let mut regular: Vec<_> = details.seasons.iter().filter(|s| s.season_number > 0).collect();
     regular.sort_by_key(|s| s.season_number);
+    let count = |n: i64| details.seasons.iter().find(|s| s.season_number == n).and_then(|s| s.episode_count);
+
+    // Explicit season: overflow into following seasons when TMDB splits a season differently.
+    let in_season = |s: i64, e: i64| -> Option<(i64, i64)> {
+        let mut season = s;
+        let mut left = e;
+        loop {
+            let c = count(season)?;
+            if left <= c {
+                return Some((season, left));
+            }
+            left -= c;
+            season += 1;
+        }
+    };
     let absolute = |n: i64| -> Option<(i64, i64)> {
         let mut left = n;
         for s in &regular {
-            let count = s.episode_count?;
-            if left <= count {
+            let c = s.episode_count?;
+            if left <= c {
                 return Some((s.season_number, left));
             }
-            left -= count;
+            left -= c;
         }
         None
     };
-    let mapped: Option<Vec<_>> = episodes.iter().map(|&e| absolute(e as i64)).collect();
+
+    let mapped: Option<Vec<(i64, i64)>> = episodes
+        .iter()
+        .map(|&e| {
+            let e = e as i64;
+            if e < 1 {
+                return None;
+            }
+            match season {
+                Some(1) => in_season(1, e).or_else(|| absolute(e)),
+                Some(s) => in_season(s as i64, e),
+                None => absolute(e),
+            }
+        })
+        .collect();
     match mapped {
-        Some(eps) if !eps.is_empty() && episodes.iter().all(|&e| e >= 1) => Resolution::Episodes { tv, episodes: eps },
+        Some(eps) if !eps.is_empty() => Resolution::Episodes { tv, episodes: eps },
         _ => Resolution::Unmatched(format!(
             "\"{}\" has no {}episode {}",
             details.name,
