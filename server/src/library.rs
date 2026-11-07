@@ -1,5 +1,7 @@
 use crate::{
     config::Config,
+    hwaccel::Hardware,
+    transcode::{trickplay, Transcoder},
     parser::{self, Guess},
     probe,
     tmdb::{MovieHit, Scored, TvDetails, TvHit, Tmdb},
@@ -20,7 +22,10 @@ pub struct Ctx {
     pub db: SqlitePool,
     pub tmdb: Option<Tmdb>,
     pub cfg: Config,
+    pub hw: Arc<Hardware>,
+    pub transcoder: Arc<Transcoder>,
     scan_lock: Mutex<()>,
+    trickplay_lock: Mutex<()>,
     pub status: RwLock<ScanStatus>,
 }
 
@@ -57,9 +62,19 @@ const TV_MIN: f64 = 0.85;
 const SEQUEL_MIN: f64 = 0.92;
 
 impl Ctx {
-    pub fn new(db: SqlitePool, cfg: Config) -> Arc<Self> {
+    pub fn new(db: SqlitePool, cfg: Config, hw: Arc<Hardware>) -> Arc<Self> {
         let tmdb = cfg.tmdb_key.clone().map(|k| Tmdb::new(k, cfg.language.clone()));
-        Arc::new(Self { db, tmdb, cfg, scan_lock: Mutex::new(()), status: Default::default() })
+        let transcoder = Transcoder::new(hw.clone(), cfg.data_dir.join("transcode"));
+        Arc::new(Self {
+            db,
+            tmdb,
+            cfg,
+            hw,
+            transcoder,
+            scan_lock: Mutex::new(()),
+            trickplay_lock: Mutex::new(()),
+            status: Default::default(),
+        })
     }
 
     async fn set_phase(&self, phase: &str, done: usize, total: usize) {
@@ -101,7 +116,34 @@ pub async fn scan(ctx: &Arc<Ctx>) -> Result<Option<ScanReport>> {
     if let Ok(r) = &result {
         s.last_report = Some(r.clone());
     }
+    drop(s);
+    if ctx.cfg.trickplay {
+        let ctx = ctx.clone();
+        tokio::spawn(async move { trickplay_pass(&ctx).await });
+    }
     result.map(Some)
+}
+
+/// Generate seek thumbnails for every matched file that lacks them, one at a time in the background.
+pub async fn trickplay_pass(ctx: &Arc<Ctx>) {
+    let Ok(_guard) = ctx.trickplay_lock.try_lock() else { return };
+    let files: Vec<(i64, String, Json<probe::MediaInfo>)> = match sqlx::query_as(
+        "SELECT id, path, probe FROM files WHERE kind IN ('movie', 'episode') AND probe IS NOT NULL ORDER BY added_at DESC",
+    )
+    .fetch_all(&ctx.db)
+    .await
+    {
+        Ok(f) => f,
+        Err(e) => return tracing::warn!("trickplay query failed: {e:#}"),
+    };
+    for (id, path, media) in files {
+        if trickplay::dir(&ctx.cfg.data_dir, id).join("manifest.json").exists() {
+            continue;
+        }
+        if let Err(e) = trickplay::generate(&ctx.hw, &ctx.cfg.data_dir, id, std::path::Path::new(&path), &media).await {
+            tracing::warn!(path, "trickplay failed: {e:#}");
+        }
+    }
 }
 
 async fn scan_inner(ctx: &Arc<Ctx>) -> Result<ScanReport> {
@@ -168,7 +210,7 @@ async fn scan_inner(ctx: &Arc<Ctx>) -> Result<ScanReport> {
         .for_each_concurrent(4, |(id, path)| {
             let probed = probed.clone();
             async move {
-                match probe::probe(std::path::Path::new(&path)).await {
+                match probe::probe(&ctx.cfg.ffprobe, std::path::Path::new(&path)).await {
                     Ok(info) => {
                         let _ = sqlx::query("UPDATE files SET probe = ?, duration = ? WHERE id = ?")
                             .bind(Json(&info)).bind(info.duration).bind(id)

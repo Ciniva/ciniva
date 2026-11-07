@@ -101,8 +101,8 @@ fn tag(tags: &std::collections::HashMap<String, String>, key: &str) -> Option<St
     tags.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.clone())
 }
 
-pub async fn probe(path: &Path) -> Result<MediaInfo> {
-    let out = tokio::process::Command::new("ffprobe")
+pub async fn probe(ffprobe: &str, path: &Path) -> Result<MediaInfo> {
+    let out = tokio::process::Command::new(ffprobe)
         .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
         .arg(path)
         .kill_on_drop(true)

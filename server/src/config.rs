@@ -10,6 +10,10 @@ pub struct Config {
     pub token: Option<String>,
     pub scan_interval_mins: u64,
     pub web_dir: Option<PathBuf>,
+    pub ffmpeg: String,
+    pub ffprobe: String,
+    pub hwaccel: String,
+    pub trickplay: bool,
 }
 
 fn var(name: &str) -> Option<String> {
@@ -31,6 +35,10 @@ impl Config {
             token: var("CINIVA_TOKEN"),
             scan_interval_mins: var("CINIVA_SCAN_INTERVAL").and_then(|p| p.parse().ok()).unwrap_or(15),
             web_dir: var("CINIVA_WEB").map(PathBuf::from),
+            ffmpeg: var("CINIVA_FFMPEG").unwrap_or_else(|| "ffmpeg".into()),
+            ffprobe: var("CINIVA_FFPROBE").unwrap_or_else(|| "ffprobe".into()),
+            hwaccel: var("CINIVA_HWACCEL").unwrap_or_else(|| "auto".into()).to_lowercase(),
+            trickplay: var("CINIVA_TRICKPLAY").map(|v| v != "0" && v != "false" && v != "off").unwrap_or(true),
         }
     }
 }

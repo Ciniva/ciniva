@@ -1,0 +1,27 @@
+services:
+  ciniva:
+    image: ghcr.io/ciniva/ciniva:latest
+    build: .
+    container_name: ciniva
+    restart: unless-stopped
+    ports:
+      - "8484:8484"
+    env_file: .env
+    environment:
+      CINIVA_MEDIA: /media
+    volumes:
+      - ./data:/data
+      - /path/to/your/dump:/media:ro
+    # Intel / AMD (integrated or discrete): VA-API and Quick Sync.
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID:-render}"
+    # NVIDIA: needs the NVIDIA Container Toolkit on the host.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video, compute, utility]

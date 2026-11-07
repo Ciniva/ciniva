@@ -23,7 +23,8 @@ async fn main() -> anyhow::Result<()> {
     }
     tracing::info!(media = ?cfg.media_dirs, data = %cfg.data_dir.display(), "starting Ciniva");
 
-    let ctx = library::Ctx::new(db, cfg.clone());
+    let hw = std::sync::Arc::new(ciniva::hwaccel::detect(&cfg.ffmpeg, &cfg.data_dir, &cfg.hwaccel).await?);
+    let ctx = library::Ctx::new(db, cfg.clone(), hw);
     let scanner = ctx.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(scanner.cfg.scan_interval_mins.max(1) * 60));

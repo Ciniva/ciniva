@@ -1,0 +1,30 @@
+FROM rust:1-trixie AS build
+WORKDIR /src
+COPY server/Cargo.toml server/Cargo.lock ./
+RUN mkdir src && echo 'fn main() {}' > src/main.rs && echo '' > src/lib.rs && cargo build --release && rm -rf src
+COPY server/src ./src
+COPY server/migrations ./migrations
+COPY server/examples ./examples
+RUN touch src/main.rs src/lib.rs && cargo build --release --bin ciniva --example hwinfo
+
+FROM debian:trixie-slim
+ARG FFMPEG_PKG=jellyfin-ffmpeg8
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+ && install -d /etc/apt/keyrings \
+ && curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key | gpg --dearmor -o /etc/apt/keyrings/jellyfin.gpg \
+ && echo "deb [signed-by=/etc/apt/keyrings/jellyfin.gpg] https://repo.jellyfin.org/debian trixie main" > /etc/apt/sources.list.d/jellyfin.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends ${FFMPEG_PKG} \
+ && apt-get purge -y gnupg && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/ciniva /usr/local/bin/ciniva
+COPY --from=build /src/target/release/examples/hwinfo /usr/local/bin/ciniva-hwinfo
+ENV CINIVA_MEDIA=/media \
+    CINIVA_DATA=/data \
+    CINIVA_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg \
+    CINIVA_FFPROBE=/usr/lib/jellyfin-ffmpeg/ffprobe \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+VOLUME ["/data"]
+EXPOSE 8484
+ENTRYPOINT ["/usr/local/bin/ciniva"]

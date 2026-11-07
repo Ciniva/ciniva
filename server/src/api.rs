@@ -60,6 +60,14 @@ pub fn router(ctx: Shared) -> Router {
         .route("/files/{id}/progress", put(progress))
         .route("/files/{id}/watched", post(watched))
         .route("/images/{size}/{name}", get(image))
+        .route("/hardware", get(hardware))
+        .route("/files/{id}/transcode", post(transcode_start))
+        .route("/files/{id}/hls.m3u8", get(transcode_playlist_direct))
+        .route("/transcode/{sid}/index.m3u8", get(transcode_playlist))
+        .route("/transcode/{sid}/{segment}", get(transcode_segment))
+        .route("/transcode/{sid}", axum::routing::delete(transcode_stop))
+        .route("/files/{id}/trickplay", get(trickplay_manifest))
+        .route("/files/{id}/trickplay/{sheet}", get(trickplay_sheet))
         .layer(middleware::from_fn_with_state(ctx.clone(), auth));
 
     let mut app = Router::new().nest("/api", api).with_state(ctx.clone());
@@ -565,4 +573,95 @@ async fn image(State(ctx): State<Shared>, Path((size, name)): Path<(String, Stri
         bytes,
     )
         .into_response())
+}
+
+async fn hardware(State(ctx): State<Shared>) -> ApiResult<serde_json::Value> {
+    Ok(Json(serde_json::json!({
+        "devices": ctx.hw.devices,
+        "transcodes": ctx.transcoder.active().await,
+    })))
+}
+
+fn token_query(req_query: Option<&str>) -> String {
+    req_query
+        .and_then(|q| q.split('&').find(|kv| kv.starts_with("token=")))
+        .map(|kv| format!("?{kv}"))
+        .unwrap_or_default()
+}
+
+async fn start_session(ctx: &Shared, id: i64, request: crate::transcode::Request) -> Result<Arc<crate::transcode::Session>, ApiError> {
+    let (path, probe): (String, Option<SqlJson<MediaInfo>>) =
+        sqlx::query_as("SELECT path, probe FROM files WHERE id = ?").bind(id).fetch_optional(&ctx.db).await?.ok_or_else(not_found)?;
+    let media = probe.ok_or_else(|| ApiError(StatusCode::CONFLICT, "file has not been probed yet".into()))?.0;
+    Ok(ctx.transcoder.start(id, path.into(), media, request).await?)
+}
+
+async fn transcode_start(
+    State(ctx): State<Shared>,
+    Path(id): Path<i64>,
+    Json(request): Json<crate::transcode::Request>,
+) -> ApiResult<serde_json::Value> {
+    let s = start_session(&ctx, id, request).await?;
+    Ok(Json(serde_json::json!({
+        "session": s.id,
+        "playlist": format!("/api/transcode/{}/index.m3u8", s.id),
+        "plan": s.plan,
+    })))
+}
+
+fn m3u8(body: String) -> Response {
+    ([(header::CONTENT_TYPE, "application/vnd.apple.mpegurl"), (header::CACHE_CONTROL, "no-store")], body).into_response()
+}
+
+async fn transcode_playlist_direct(
+    State(ctx): State<Shared>,
+    Path(id): Path<i64>,
+    Query(request): Query<crate::transcode::Request>,
+    uri: axum::http::Uri,
+) -> Result<Response, ApiError> {
+    let s = start_session(&ctx, id, request).await?;
+    Ok(m3u8(s.playlist(&format!("/api/transcode/{}/", s.id), &token_query(uri.query()))))
+}
+
+async fn transcode_playlist(State(ctx): State<Shared>, Path(sid): Path<String>, uri: axum::http::Uri) -> Result<Response, ApiError> {
+    let s = ctx.transcoder.get(&sid).await.ok_or_else(not_found)?;
+    Ok(m3u8(s.playlist("", &token_query(uri.query()))))
+}
+
+async fn transcode_segment(State(ctx): State<Shared>, Path((sid, segment)): Path<(String, String)>) -> Result<Response, ApiError> {
+    let s = ctx.transcoder.get(&sid).await.ok_or_else(not_found)?;
+    if segment == "init.mp4" {
+        let bytes = s.init_segment().await?;
+        return Ok(([(header::CONTENT_TYPE, "video/mp4"), (header::CACHE_CONTROL, "no-store")], bytes.to_vec()).into_response());
+    }
+    let path = {
+        let n: u64 = segment
+            .strip_suffix(".ts")
+            .or_else(|| segment.strip_suffix(".m4s"))
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(not_found)?;
+        s.segment(n).await?
+    };
+    let bytes = tokio::fs::read(&path).await?;
+    let ctype = if segment.ends_with(".ts") { "video/mp2t" } else { "video/mp4" };
+    let _ = s.content_type();
+    Ok(([(header::CONTENT_TYPE, ctype), (header::CACHE_CONTROL, "no-store")], bytes).into_response())
+}
+
+async fn transcode_stop(State(ctx): State<Shared>, Path(sid): Path<String>) -> StatusCode {
+    ctx.transcoder.stop(&sid).await;
+    StatusCode::NO_CONTENT
+}
+
+async fn trickplay_manifest(State(ctx): State<Shared>, Path(id): Path<i64>) -> Result<Response, ApiError> {
+    let path = crate::transcode::trickplay::dir(&ctx.cfg.data_dir, id).join("manifest.json");
+    let bytes = tokio::fs::read(&path).await.map_err(|_| not_found())?;
+    Ok(([(header::CONTENT_TYPE, "application/json")], bytes).into_response())
+}
+
+async fn trickplay_sheet(State(ctx): State<Shared>, Path((id, sheet)): Path<(i64, String)>) -> Result<Response, ApiError> {
+    let n: u32 = sheet.strip_suffix(".jpg").and_then(|n| n.parse().ok()).ok_or_else(not_found)?;
+    let path = crate::transcode::trickplay::dir(&ctx.cfg.data_dir, id).join(format!("{n}.jpg"));
+    let bytes = tokio::fs::read(&path).await.map_err(|_| not_found())?;
+    Ok(([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "public, max-age=86400")], bytes).into_response())
 }
