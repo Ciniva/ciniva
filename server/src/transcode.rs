@@ -14,6 +14,8 @@ use tokio::{process::Child, sync::Mutex};
 
 pub const SEGMENT_SECS: f64 = 6.0;
 const REMUX_LEAD: f64 = 1.0;
+const AHEAD_PAUSE: u64 = 30;
+const AHEAD_RESUME: u64 = 15;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Request {
@@ -71,6 +73,21 @@ pub struct Plan {
 struct Running {
     child: Child,
     start_segment: u64,
+    paused: bool,
+}
+
+impl Running {
+    /// SIGSTOP/SIGCONT the encoder so it never runs more than a few minutes ahead of the player.
+    fn throttle(&mut self, ahead: u64) {
+        let pause = if self.paused { ahead > AHEAD_RESUME } else { ahead > AHEAD_PAUSE };
+        if pause == self.paused {
+            return;
+        }
+        if let Some(pid) = self.child.id() {
+            unsafe { libc::kill(pid as i32, if pause { libc::SIGSTOP } else { libc::SIGCONT }) };
+            self.paused = pause;
+        }
+    }
 }
 
 pub struct Session {
@@ -85,6 +102,7 @@ pub struct Session {
     lease: Lease,
     pub plan: Plan,
     running: Mutex<Option<Running>>,
+    playhead: std::sync::atomic::AtomicU64,
     init: Mutex<Option<Arc<Vec<u8>>>>,
     last_access: Mutex<Instant>,
     ffmpeg: String,
@@ -278,6 +296,7 @@ impl Transcoder {
             lease,
             plan,
             running: Mutex::new(None),
+            playhead: Default::default(),
             init: Mutex::new(None),
             last_access: Mutex::new(Instant::now()),
             ffmpeg: self.hw.ffmpeg.clone(),
@@ -285,6 +304,14 @@ impl Transcoder {
             filters: self.filters.clone(),
         });
         tracing::info!(session = id, file_id, plan = ?session.plan, "transcode session");
+        let weak = Arc::downgrade(&session);
+        tokio::spawn(async move {
+            while let Some(s) = weak.upgrade() {
+                s.throttle().await;
+                drop(s);
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        });
         self.sessions.lock().await.insert(id, session.clone());
         Ok(session)
     }
@@ -541,6 +568,8 @@ impl Session {
         let deadline = Instant::now() + Duration::from_secs(45);
         loop {
             if self.ready(n).await {
+                self.playhead.store(n, std::sync::atomic::Ordering::Relaxed);
+                self.prune(n).await;
                 return Ok(path);
             }
             {
@@ -549,7 +578,7 @@ impl Session {
                     None => true,
                     Some(r) => {
                         let exited = r.child.try_wait()?.is_some();
-                        let produced = self.highest_from(r.start_segment);
+                        let produced = self.highest_from(r.start_segment.max(n.saturating_sub(10)));
                         let ahead = produced.map_or(r.start_segment, |p| p + 1);
                         n < r.start_segment || n > ahead + 2 || (exited && !self.ready(n).await)
                     }
@@ -583,6 +612,28 @@ impl Session {
             .collect())
     }
 
+    async fn throttle(&self) {
+        let playhead = self.playhead.load(std::sync::atomic::Ordering::Relaxed);
+        let mut running = self.running.lock().await;
+        let Some(r) = running.as_mut() else { return };
+        let from = r.start_segment.max(playhead.saturating_sub(10));
+        let ahead = self.highest_from(from).map_or(0, |p| p.saturating_sub(playhead.max(r.start_segment)));
+        r.throttle(ahead);
+    }
+
+    /// Drop segments well behind the playhead so a long stream never accumulates the whole movie on disk.
+    async fn prune(&self, playing: u64) {
+        let Some(keep_from) = playing.checked_sub(10) else { return };
+        let Ok(mut dir) = tokio::fs::read_dir(&self.dir).await else { return };
+        while let Ok(Some(e)) = dir.next_entry().await {
+            let name = e.file_name();
+            let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(&format!(".{}", self.ext()))) else { continue };
+            if stem.parse::<u64>().is_ok_and(|i| i < keep_from) {
+                let _ = tokio::fs::remove_file(e.path()).await;
+            }
+        }
+    }
+
     fn highest_from(&self, start: u64) -> Option<u64> {
         let mut i = start;
         let mut last = None;
@@ -604,7 +655,7 @@ impl Session {
             .stderr(std::process::Stdio::from(std::fs::File::create(self.dir.join("ffmpeg.log"))?))
             .kill_on_drop(true)
             .spawn()?;
-        Ok(Running { child, start_segment })
+        Ok(Running { child, start_segment, paused: false })
     }
 
     fn audio_args(&self) -> Vec<String> {

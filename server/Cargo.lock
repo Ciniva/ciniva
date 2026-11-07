@@ -208,12 +208,13 @@ dependencies = [
 
 [[package]]
 name = "ciniva"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "axum",
  "chrono",
  "futures",
+ "libc",
  "once_cell",
  "regex",
  "reqwest",
