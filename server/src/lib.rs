@@ -1,6 +1,7 @@
 pub mod api;
 pub mod config;
 pub mod hwaccel;
+pub mod index;
 pub mod library;
 pub mod parser;
 pub mod probe;

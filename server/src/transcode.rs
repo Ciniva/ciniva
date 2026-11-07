@@ -186,10 +186,10 @@ impl Transcoder {
     pub async fn start(&self, file_id: i64, input: PathBuf, media: MediaInfo, request: Request) -> Result<Arc<Session>> {
         let Some(duration) = media.duration.filter(|d| *d > 0.0) else { bail!("unknown duration; probe the file first") };
         let remux = if remuxable(&media, &request) {
-            match self.keyframes.cached(file_id, &input).await {
+            match self.keyframes.quick(file_id, &input, duration).await {
                 Some(kf) => Some(segment_bounds(&kf, duration)).filter(|b| b.len() > 1 || duration <= SEGMENT_SECS * 4.0),
                 None => {
-                    self.keyframes.spawn(file_id, input.clone());
+                    self.keyframes.spawn(file_id, input.clone(), duration);
                     None
                 }
             }
@@ -382,8 +382,38 @@ impl Keyframes {
         serde_json::from_slice(&bytes).ok()
     }
 
-    pub async fn extract(&self, file_id: i64, input: &std::path::Path) -> Result<Vec<f64>> {
+    async fn store(&self, file_id: i64, input: &std::path::Path, k: &[f64]) -> Result<()> {
+        let path = self.cache_path(file_id, input).ok_or_else(|| anyhow::anyhow!("cannot stat input"))?;
+        tokio::fs::create_dir_all(&self.dir).await?;
+        let prefix = format!("{file_id}-");
+        if let Ok(mut d) = tokio::fs::read_dir(&self.dir).await {
+            while let Ok(Some(e)) = d.next_entry().await {
+                if e.file_name().to_string_lossy().starts_with(&prefix) {
+                    let _ = tokio::fs::remove_file(e.path()).await;
+                }
+            }
+        }
+        tokio::fs::write(&path, serde_json::to_vec(k)?).await?;
+        Ok(())
+    }
+
+    /// Cached times, else the container's own index (milliseconds even for huge files). None means only a
+    /// full scan can tell.
+    pub async fn quick(&self, file_id: i64, input: &std::path::Path, duration: f64) -> Option<Vec<f64>> {
         if let Some(k) = self.cached(file_id, input).await {
+            return Some(k);
+        }
+        let path = input.to_path_buf();
+        let k = tokio::task::spawn_blocking(move || crate::index::keyframes(&path)).await.ok()??;
+        if !crate::index::usable(&k, duration) {
+            return None;
+        }
+        let _ = self.store(file_id, input, &k).await;
+        Some(k)
+    }
+
+    pub async fn extract(&self, file_id: i64, input: &std::path::Path, duration: f64) -> Result<Vec<f64>> {
+        if let Some(k) = self.quick(file_id, input, duration).await {
             return Ok(k);
         }
         let out = tokio::process::Command::new(&self.ffprobe)
@@ -404,29 +434,19 @@ impl Keyframes {
             .collect();
         k.sort_by(|a, b| a.total_cmp(b));
         k.dedup();
-        let path = self.cache_path(file_id, input).ok_or_else(|| anyhow::anyhow!("cannot stat input"))?;
-        tokio::fs::create_dir_all(&self.dir).await?;
-        let prefix = format!("{file_id}-");
-        if let Ok(mut d) = tokio::fs::read_dir(&self.dir).await {
-            while let Ok(Some(e)) = d.next_entry().await {
-                if e.file_name().to_string_lossy().starts_with(&prefix) {
-                    let _ = tokio::fs::remove_file(e.path()).await;
-                }
-            }
-        }
-        tokio::fs::write(&path, serde_json::to_vec(&k)?).await?;
+        self.store(file_id, input, &k).await?;
         Ok(k)
     }
 
     /// Extract in the background unless that file is already being read.
-    pub fn spawn(self: &Arc<Self>, file_id: i64, input: PathBuf) {
+    pub fn spawn(self: &Arc<Self>, file_id: i64, input: PathBuf, duration: f64) {
         if !self.busy.lock().unwrap().insert(file_id) {
             return;
         }
         let me = self.clone();
         tokio::spawn(async move {
             let started = Instant::now();
-            match me.extract(file_id, &input).await {
+            match me.extract(file_id, &input, duration).await {
                 Ok(k) => tracing::info!(file_id, keyframes = k.len(), secs = started.elapsed().as_secs_f32(), "keyframes indexed"),
                 Err(e) => tracing::warn!(file_id, "keyframe index failed: {e:#}"),
             }

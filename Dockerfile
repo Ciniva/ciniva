@@ -5,7 +5,7 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs && echo '' > src/lib.rs && ca
 COPY server/src ./src
 COPY server/migrations ./migrations
 COPY server/examples ./examples
-RUN touch src/main.rs src/lib.rs && cargo build --release --bin ciniva --example hwinfo
+RUN touch src/main.rs src/lib.rs && cargo build --release --bin ciniva --example hwinfo --example keyframes
 
 FROM debian:trixie-slim
 ARG FFMPEG_PKG=jellyfin-ffmpeg8
@@ -25,6 +25,7 @@ RUN groupadd --gid ${GID} ciniva \
  && { find / -xdev -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true; }
 COPY --from=build /src/target/release/ciniva /usr/local/bin/ciniva
 COPY --from=build /src/target/release/examples/hwinfo /usr/local/bin/ciniva-hwinfo
+COPY --from=build /src/target/release/examples/keyframes /usr/local/bin/ciniva-keyframes
 COPY web /web
 ENV CINIVA_MEDIA=/media \
     CINIVA_DATA=/data \

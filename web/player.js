@@ -15,6 +15,7 @@ const testVideo = document.createElement('video');
 const mse = (t) => { try { return !!window.MediaSource?.isTypeSupported(t); } catch { return false; } };
 const can = (t) => testVideo.canPlayType(t) !== '' || mse(t);
 const isApple = /Apple/.test(navigator.vendor);
+const isChromium = !!window.chrome && /Chrome|Chromium|Edg\//.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
 const caps = {
   hevc: can('video/mp4; codecs="hvc1.1.6.L150.B0"'),
   hevc10: can('video/mp4; codecs="hvc1.2.4.L153.B0"'),
@@ -50,7 +51,9 @@ function directPlayable(file, audio) {
   const p = file.probe;
   if (!p?.video) return false;
   const ext = file.path.split('.').pop().toLowerCase();
-  const mime = { mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/mp4', webm: 'video/webm' }[ext];
+  // Chromium plays Matroska through its WebM demuxer, the same codecs it accepts in MP4 (as Jellyfin does).
+  const mkv = ext === 'mkv' && isChromium;
+  const mime = mkv ? 'video/mp4' : { mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/mp4', webm: 'video/webm' }[ext];
   if (!mime) return false;
   const v = p.video;
   if (v.dolby_vision_profile === 5 && !(isApple && can('video/mp4; codecs="dvh1.05.06"'))) return false;
@@ -59,7 +62,8 @@ function directPlayable(file, audio) {
   const vc = videoCodec(v);
   const ac = audio ? audioCodec(audio) : null;
   if (!vc || (audio && !ac)) return false;
-  return testVideo.canPlayType(`${mime}; codecs="${[vc, ac].filter(Boolean).join(',')}"`) !== '';
+  const type = `${mime}; codecs="${[vc, ac].filter(Boolean).join(',')}"`;
+  return mkv ? can(type) : testVideo.canPlayType(type) !== '';
 }
 
 function canCopyVideo(v) {

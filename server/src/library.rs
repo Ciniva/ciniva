@@ -142,7 +142,7 @@ pub async fn trickplay_pass(ctx: &Arc<Ctx>) {
     for (id, path, media) in files {
         let video = media.video.as_ref();
         if video.is_some_and(|v| crate::transcode::REMUX_CODECS.contains(&v.codec.as_str()) && v.dolby_vision_profile != Some(5)) {
-            if let Err(e) = ctx.keyframes.extract(id, std::path::Path::new(&path)).await {
+            if let Err(e) = ctx.keyframes.extract(id, std::path::Path::new(&path), media.duration.unwrap_or(0.0)).await {
                 tracing::warn!(path, "keyframe index failed: {e:#}");
             }
         }
