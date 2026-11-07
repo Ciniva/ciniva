@@ -1,0 +1,568 @@
+use crate::{library::{self, Ctx}, probe::MediaInfo};
+use axum::{
+    body::Body,
+    extract::{Path, Query, Request, State},
+    http::{header, HeaderValue, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{get, post, put},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use sqlx::{types::Json as SqlJson, FromRow};
+use std::{collections::HashMap, sync::Arc};
+use tower::ServiceExt;
+use tower_http::services::ServeFile;
+
+type Shared = Arc<Ctx>;
+
+pub struct ApiError(StatusCode, String);
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.0, Json(serde_json::json!({ "error": self.1 }))).into_response()
+    }
+}
+
+impl<E: Into<anyhow::Error>> From<E> for ApiError {
+    fn from(e: E) -> Self {
+        let e = e.into();
+        if matches!(e.downcast_ref::<sqlx::Error>(), Some(sqlx::Error::RowNotFound)) {
+            return ApiError(StatusCode::NOT_FOUND, "not found".into());
+        }
+        tracing::error!("{e:#}");
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))
+    }
+}
+
+type ApiResult<T> = Result<Json<T>, ApiError>;
+
+fn not_found() -> ApiError {
+    ApiError(StatusCode::NOT_FOUND, "not found".into())
+}
+
+pub fn router(ctx: Shared) -> Router {
+    let api = Router::new()
+        .route("/status", get(status))
+        .route("/scan", post(start_scan))
+        .route("/home", get(home))
+        .route("/movies", get(movies))
+        .route("/movies/{id}", get(movie))
+        .route("/shows", get(shows))
+        .route("/shows/{id}", get(show))
+        .route("/shows/{id}/seasons/{season}", get(season))
+        .route("/search", get(search))
+        .route("/unmatched", get(unmatched))
+        .route("/tmdb/search", get(tmdb_search))
+        .route("/files/{id}", get(file))
+        .route("/files/{id}/match", post(match_file))
+        .route("/files/{id}/stream", get(stream))
+        .route("/files/{id}/progress", put(progress))
+        .route("/files/{id}/watched", post(watched))
+        .route("/images/{size}/{name}", get(image))
+        .layer(middleware::from_fn_with_state(ctx.clone(), auth));
+
+    let mut app = Router::new().nest("/api", api).with_state(ctx.clone());
+    if let Some(web) = ctx.cfg.web_dir.clone() {
+        let index = web.join("index.html");
+        app = app.fallback_service(tower_http::services::ServeDir::new(web).fallback(ServeFile::new(index)));
+    }
+    app.layer(tower_http::cors::CorsLayer::permissive())
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+}
+
+async fn auth(State(ctx): State<Shared>, req: Request, next: Next) -> Response {
+    let Some(expected) = ctx.cfg.token.as_deref() else { return next.run(req).await };
+    let header = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let query = req.uri().query().and_then(|q| {
+        q.split('&').find_map(|kv| kv.strip_prefix("token="))
+    });
+    if header == Some(expected) || query == Some(expected) {
+        next.run(req).await
+    } else {
+        ApiError(StatusCode::UNAUTHORIZED, "missing or wrong token".into()).into_response()
+    }
+}
+
+#[derive(Serialize)]
+struct Status {
+    version: &'static str,
+    tmdb: bool,
+    scan: library::ScanStatus,
+    counts: Counts,
+}
+
+#[derive(Serialize, FromRow)]
+struct Counts {
+    movies: i64,
+    shows: i64,
+    episodes: i64,
+    unmatched: i64,
+    pending: i64,
+}
+
+async fn status(State(ctx): State<Shared>) -> ApiResult<Status> {
+    let counts: Counts = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM movies) movies, (SELECT COUNT(*) FROM shows) shows,
+                (SELECT COUNT(DISTINCT episode_id) FROM file_episodes) episodes,
+                (SELECT COUNT(*) FROM files WHERE kind = 'unmatched') unmatched,
+                (SELECT COUNT(*) FROM files WHERE kind = 'pending') pending",
+    )
+    .fetch_one(&ctx.db)
+    .await?;
+    Ok(Json(Status { version: env!("CARGO_PKG_VERSION"), tmdb: ctx.tmdb.is_some(), scan: ctx.status.read().await.clone(), counts }))
+}
+
+async fn start_scan(State(ctx): State<Shared>) -> StatusCode {
+    tokio::spawn(async move {
+        if let Err(e) = library::scan(&ctx).await {
+            tracing::error!("scan failed: {e:#}");
+        }
+    });
+    StatusCode::ACCEPTED
+}
+
+#[derive(Serialize, FromRow)]
+struct Progress {
+    position_ms: Option<i64>,
+    duration_ms: Option<i64>,
+    watched: Option<bool>,
+}
+
+#[derive(Serialize, FromRow)]
+struct MovieCard {
+    id: i64,
+    title: String,
+    year: Option<i64>,
+    poster_path: Option<String>,
+    backdrop_path: Option<String>,
+    rating: Option<f64>,
+    added_at: String,
+    #[sqlx(flatten)]
+    progress: Progress,
+}
+
+const MOVIE_CARD: &str = "SELECT m.id, m.title, m.year, m.poster_path, m.backdrop_path, m.rating, m.added_at,
+    p.position_ms, p.duration_ms, p.watched
+    FROM movies m
+    LEFT JOIN progress p ON p.file_id = (SELECT MIN(f.id) FROM files f WHERE f.movie_id = m.id)";
+
+#[derive(Serialize, FromRow)]
+struct ShowCard {
+    id: i64,
+    title: String,
+    year: Option<i64>,
+    poster_path: Option<String>,
+    backdrop_path: Option<String>,
+    rating: Option<f64>,
+    episodes: i64,
+    watched_episodes: i64,
+    last_added: Option<String>,
+}
+
+const SHOW_CARD: &str = "SELECT s.id, s.title, s.year, s.poster_path, s.backdrop_path, s.rating,
+    COUNT(DISTINCT e.id) episodes,
+    COUNT(DISTINCT CASE WHEN p.watched = 1 THEN e.id END) watched_episodes,
+    MAX(f.added_at) last_added
+    FROM shows s
+    JOIN episodes e ON e.show_id = s.id
+    JOIN file_episodes fe ON fe.episode_id = e.id
+    JOIN files f ON f.id = fe.file_id
+    LEFT JOIN progress p ON p.file_id = f.id";
+
+#[derive(Deserialize)]
+struct ListQuery {
+    sort: Option<String>,
+}
+
+fn order(sort: Option<&str>, kind: &str) -> &'static str {
+    match (sort.unwrap_or("title"), kind) {
+        ("added", "movie") => " ORDER BY m.added_at DESC",
+        ("added", _) => " ORDER BY last_added DESC",
+        ("year", "movie") => " ORDER BY m.year DESC, m.title",
+        ("year", _) => " ORDER BY s.year DESC, s.title",
+        ("rating", "movie") => " ORDER BY m.rating DESC",
+        ("rating", _) => " ORDER BY s.rating DESC",
+        (_, "movie") => " ORDER BY m.title COLLATE NOCASE",
+        _ => " ORDER BY s.title COLLATE NOCASE",
+    }
+}
+
+async fn movies(State(ctx): State<Shared>, Query(q): Query<ListQuery>) -> ApiResult<Vec<MovieCard>> {
+    let sql = format!("{MOVIE_CARD}{}", order(q.sort.as_deref(), "movie"));
+    Ok(Json(sqlx::query_as(&sql).fetch_all(&ctx.db).await?))
+}
+
+async fn shows(State(ctx): State<Shared>, Query(q): Query<ListQuery>) -> ApiResult<Vec<ShowCard>> {
+    let sql = format!("{SHOW_CARD} GROUP BY s.id{}", order(q.sort.as_deref(), "show"));
+    Ok(Json(sqlx::query_as(&sql).fetch_all(&ctx.db).await?))
+}
+
+#[derive(Serialize, FromRow)]
+struct FileView {
+    id: i64,
+    path: String,
+    size: i64,
+    duration: Option<f64>,
+    probe: Option<SqlJson<MediaInfo>>,
+    added_at: String,
+    #[sqlx(flatten)]
+    progress: Progress,
+}
+
+const FILE_VIEW: &str = "SELECT f.id, f.path, f.size, f.duration, f.probe, f.added_at, p.position_ms, p.duration_ms, p.watched
+    FROM files f LEFT JOIN progress p ON p.file_id = f.id";
+
+#[derive(Serialize, FromRow)]
+struct MovieView {
+    id: i64,
+    tmdb_id: i64,
+    title: String,
+    original_title: Option<String>,
+    year: Option<i64>,
+    overview: Option<String>,
+    tagline: Option<String>,
+    poster_path: Option<String>,
+    backdrop_path: Option<String>,
+    runtime: Option<i64>,
+    rating: Option<f64>,
+    genres: SqlJson<Vec<String>>,
+    release_date: Option<String>,
+    #[sqlx(rename = "cast_json")]
+    cast: SqlJson<serde_json::Value>,
+    #[sqlx(skip)]
+    files: Vec<FileView>,
+}
+
+async fn movie(State(ctx): State<Shared>, Path(id): Path<i64>) -> ApiResult<MovieView> {
+    let mut m: MovieView = sqlx::query_as("SELECT * FROM movies WHERE id = ?").bind(id).fetch_one(&ctx.db).await?;
+    m.files = sqlx::query_as(&format!("{FILE_VIEW} WHERE f.movie_id = ? ORDER BY f.size DESC"))
+        .bind(id)
+        .fetch_all(&ctx.db)
+        .await?;
+    Ok(Json(m))
+}
+
+#[derive(Serialize, FromRow)]
+struct ShowView {
+    id: i64,
+    tmdb_id: i64,
+    title: String,
+    original_title: Option<String>,
+    year: Option<i64>,
+    overview: Option<String>,
+    poster_path: Option<String>,
+    backdrop_path: Option<String>,
+    rating: Option<f64>,
+    genres: SqlJson<Vec<String>>,
+    first_air_date: Option<String>,
+    status: Option<String>,
+    #[sqlx(rename = "cast_json")]
+    cast: SqlJson<serde_json::Value>,
+    #[sqlx(skip)]
+    seasons: Vec<SeasonCard>,
+}
+
+#[derive(Serialize, FromRow)]
+struct SeasonCard {
+    season_number: i64,
+    name: Option<String>,
+    poster_path: Option<String>,
+    air_date: Option<String>,
+    episode_count: Option<i64>,
+    available: i64,
+    watched: i64,
+}
+
+async fn show(State(ctx): State<Shared>, Path(id): Path<i64>) -> ApiResult<ShowView> {
+    let mut s: ShowView = sqlx::query_as("SELECT * FROM shows WHERE id = ?").bind(id).fetch_one(&ctx.db).await?;
+    s.seasons = sqlx::query_as(
+        "SELECT se.season_number, se.name, se.poster_path, se.air_date, se.episode_count,
+            COUNT(DISTINCT fe.episode_id) available,
+            COUNT(DISTINCT CASE WHEN p.watched = 1 THEN e.id END) watched
+         FROM seasons se
+         JOIN episodes e ON e.show_id = se.show_id AND e.season_number = se.season_number
+         LEFT JOIN file_episodes fe ON fe.episode_id = e.id
+         LEFT JOIN progress p ON p.file_id = fe.file_id
+         WHERE se.show_id = ?
+         GROUP BY se.id HAVING available > 0
+         ORDER BY se.season_number = 0, se.season_number",
+    )
+    .bind(id)
+    .fetch_all(&ctx.db)
+    .await?;
+    Ok(Json(s))
+}
+
+#[derive(Serialize, FromRow)]
+struct EpisodeView {
+    id: i64,
+    season_number: i64,
+    episode_number: i64,
+    title: Option<String>,
+    overview: Option<String>,
+    still_path: Option<String>,
+    air_date: Option<String>,
+    runtime: Option<i64>,
+    rating: Option<f64>,
+    #[sqlx(skip)]
+    files: Vec<FileView>,
+}
+
+async fn season(State(ctx): State<Shared>, Path((id, season)): Path<(i64, i64)>) -> ApiResult<Vec<EpisodeView>> {
+    let mut episodes: Vec<EpisodeView> = sqlx::query_as(
+        "SELECT id, season_number, episode_number, title, overview, still_path, air_date, runtime, rating
+         FROM episodes WHERE show_id = ? AND season_number = ? ORDER BY episode_number",
+    )
+    .bind(id)
+    .bind(season)
+    .fetch_all(&ctx.db)
+    .await?;
+    let rows: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT fe.episode_id, fe.file_id FROM file_episodes fe JOIN episodes e ON e.id = fe.episode_id
+         WHERE e.show_id = ? AND e.season_number = ?",
+    )
+    .bind(id)
+    .bind(season)
+    .fetch_all(&ctx.db)
+    .await?;
+    let mut by_episode: HashMap<i64, Vec<i64>> = HashMap::new();
+    for (eid, fid) in rows {
+        by_episode.entry(eid).or_default().push(fid);
+    }
+    for e in &mut episodes {
+        for fid in by_episode.get(&e.id).into_iter().flatten() {
+            if let Some(f) = sqlx::query_as::<_, FileView>(&format!("{FILE_VIEW} WHERE f.id = ?")).bind(fid).fetch_optional(&ctx.db).await? {
+                e.files.push(f);
+            }
+        }
+    }
+    Ok(Json(episodes))
+}
+
+#[derive(Serialize, FromRow)]
+struct ContinueItem {
+    file_id: i64,
+    position_ms: i64,
+    duration_ms: i64,
+    updated_at: String,
+    movie_id: Option<i64>,
+    show_id: Option<i64>,
+    title: String,
+    subtitle: Option<String>,
+    image_path: Option<String>,
+    poster_path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct Home {
+    continue_watching: Vec<ContinueItem>,
+    recent_movies: Vec<MovieCard>,
+    recent_shows: Vec<ShowCard>,
+}
+
+async fn home(State(ctx): State<Shared>) -> ApiResult<Home> {
+    let continue_watching = sqlx::query_as(
+        "SELECT p.file_id, p.position_ms, p.duration_ms, p.updated_at,
+            m.id movie_id, s.id show_id,
+            COALESCE(m.title, s.title) title,
+            CASE WHEN e.id IS NOT NULL THEN 'S' || e.season_number || ' · E' || e.episode_number || COALESCE(' — ' || e.title, '') END subtitle,
+            COALESCE(e.still_path, m.backdrop_path, s.backdrop_path) image_path,
+            COALESCE(m.poster_path, s.poster_path) poster_path
+         FROM progress p
+         JOIN files f ON f.id = p.file_id
+         LEFT JOIN movies m ON m.id = f.movie_id
+         LEFT JOIN file_episodes fe ON fe.file_id = f.id
+         LEFT JOIN episodes e ON e.id = fe.episode_id
+         LEFT JOIN shows s ON s.id = e.show_id
+         WHERE p.watched = 0 AND p.position_ms > 30000 AND (m.id IS NOT NULL OR s.id IS NOT NULL)
+         GROUP BY p.file_id
+         ORDER BY p.updated_at DESC LIMIT 20",
+    )
+    .fetch_all(&ctx.db)
+    .await?;
+    let recent_movies = sqlx::query_as(&format!("{MOVIE_CARD} ORDER BY m.added_at DESC LIMIT 20")).fetch_all(&ctx.db).await?;
+    let recent_shows = sqlx::query_as(&format!("{SHOW_CARD} GROUP BY s.id ORDER BY last_added DESC LIMIT 20")).fetch_all(&ctx.db).await?;
+    Ok(Json(Home { continue_watching, recent_movies, recent_shows }))
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+}
+
+#[derive(Serialize)]
+struct SearchResults {
+    movies: Vec<MovieCard>,
+    shows: Vec<ShowCard>,
+}
+
+async fn search(State(ctx): State<Shared>, Query(q): Query<SearchQuery>) -> ApiResult<SearchResults> {
+    let like = format!("%{}%", q.q.trim());
+    let movies = sqlx::query_as(&format!("{MOVIE_CARD} WHERE m.title LIKE ?1 OR m.original_title LIKE ?1 ORDER BY m.rating DESC LIMIT 40"))
+        .bind(&like)
+        .fetch_all(&ctx.db)
+        .await?;
+    let shows = sqlx::query_as(&format!("{SHOW_CARD} WHERE s.title LIKE ?1 OR s.original_title LIKE ?1 GROUP BY s.id ORDER BY s.rating DESC LIMIT 40"))
+        .bind(&like)
+        .fetch_all(&ctx.db)
+        .await?;
+    Ok(Json(SearchResults { movies, shows }))
+}
+
+#[derive(Serialize, FromRow)]
+struct UnmatchedFile {
+    id: i64,
+    path: String,
+    size: i64,
+    duration: Option<f64>,
+    guess: SqlJson<serde_json::Value>,
+    match_note: Option<String>,
+}
+
+async fn unmatched(State(ctx): State<Shared>) -> ApiResult<Vec<UnmatchedFile>> {
+    Ok(Json(
+        sqlx::query_as("SELECT id, path, size, duration, guess, match_note FROM files WHERE kind IN ('unmatched', 'pending') ORDER BY path")
+            .fetch_all(&ctx.db)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct TmdbSearchQuery {
+    q: String,
+    kind: String,
+    year: Option<i32>,
+}
+
+async fn tmdb_search(State(ctx): State<Shared>, Query(q): Query<TmdbSearchQuery>) -> ApiResult<serde_json::Value> {
+    let tmdb = ctx.tmdb.as_ref().ok_or_else(|| ApiError(StatusCode::SERVICE_UNAVAILABLE, "TMDB_API_KEY not set".into()))?;
+    let value = if q.kind == "movie" {
+        serde_json::to_value(tmdb.search_movie(&q.q, q.year).await?.into_iter().take(10).map(|s| s.hit).map(|h| {
+            serde_json::json!({ "id": h.id, "title": h.title, "year": crate::tmdb::year_of(&h.release_date) })
+        }).collect::<Vec<_>>())?
+    } else {
+        serde_json::to_value(tmdb.search_tv(&q.q, q.year).await?.into_iter().take(10).map(|s| s.hit).map(|h| {
+            serde_json::json!({ "id": h.id, "title": h.name, "year": crate::tmdb::year_of(&h.first_air_date) })
+        }).collect::<Vec<_>>())?
+    };
+    Ok(Json(value))
+}
+
+async fn file(State(ctx): State<Shared>, Path(id): Path<i64>) -> ApiResult<FileView> {
+    Ok(Json(sqlx::query_as(&format!("{FILE_VIEW} WHERE f.id = ?")).bind(id).fetch_one(&ctx.db).await?))
+}
+
+#[derive(Deserialize)]
+struct MatchBody {
+    kind: String,
+    tmdb_id: i64,
+    season: Option<i64>,
+    episode: Option<i64>,
+}
+
+async fn match_file(State(ctx): State<Shared>, Path(id): Path<i64>, Json(b): Json<MatchBody>) -> ApiResult<serde_json::Value> {
+    if ctx.tmdb.is_none() {
+        return Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "TMDB_API_KEY not set".into()));
+    }
+    if b.kind != "movie" && (b.season.is_none() || b.episode.is_none()) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "season and episode are required for shows".into()));
+    }
+    let ok = library::manual_match(&ctx, id, &b.kind, b.tmdb_id, b.season, b.episode).await?;
+    Ok(Json(serde_json::json!({ "matched": ok })))
+}
+
+async fn stream(State(ctx): State<Shared>, Path(id): Path<i64>, req: Request) -> Result<Response, ApiError> {
+    let (path,): (String,) = sqlx::query_as("SELECT path FROM files WHERE id = ?").bind(id).fetch_optional(&ctx.db).await?.ok_or_else(not_found)?;
+    let mime = match std::path::Path::new(&path).extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("mp4" | "m4v") => "video/mp4",
+        Some("mov") => "video/quicktime",
+        Some("mkv") => "video/x-matroska",
+        Some("webm") => "video/webm",
+        Some("ts" | "m2ts") => "video/mp2t",
+        Some("avi") => "video/x-msvideo",
+        _ => "application/octet-stream",
+    };
+    let mut resp = ServeFile::new_with_mime(&path, &mime.parse().unwrap())
+        .oneshot(req)
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map(Body::new);
+    resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(resp)
+}
+
+#[derive(Deserialize)]
+struct ProgressBody {
+    position_ms: i64,
+    duration_ms: i64,
+}
+
+async fn progress(State(ctx): State<Shared>, Path(id): Path<i64>, Json(b): Json<ProgressBody>) -> Result<StatusCode, ApiError> {
+    let watched = b.duration_ms > 0 && b.position_ms as f64 / b.duration_ms as f64 > 0.9;
+    sqlx::query(
+        "INSERT INTO progress (file_id, position_ms, duration_ms, watched, updated_at) VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT (file_id) DO UPDATE SET position_ms = excluded.position_ms, duration_ms = excluded.duration_ms,
+           watched = MAX(progress.watched, excluded.watched), updated_at = excluded.updated_at",
+    )
+    .bind(id)
+    .bind(if watched { 0 } else { b.position_ms })
+    .bind(b.duration_ms)
+    .bind(watched)
+    .execute(&ctx.db)
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct WatchedBody {
+    watched: bool,
+}
+
+async fn watched(State(ctx): State<Shared>, Path(id): Path<i64>, Json(b): Json<WatchedBody>) -> Result<StatusCode, ApiError> {
+    sqlx::query(
+        "INSERT INTO progress (file_id, position_ms, duration_ms, watched, updated_at) VALUES (?, 0, 0, ?, datetime('now'))
+         ON CONFLICT (file_id) DO UPDATE SET watched = excluded.watched, position_ms = 0, updated_at = excluded.updated_at",
+    )
+    .bind(id)
+    .bind(b.watched)
+    .execute(&ctx.db)
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn image(State(ctx): State<Shared>, Path((size, name)): Path<(String, String)>) -> Result<Response, ApiError> {
+    const SIZES: &[&str] = &["w92", "w154", "w185", "w300", "w342", "w500", "w780", "w1280", "original"];
+    let valid_name = name.len() < 100
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        && !name.starts_with('.')
+        && (name.ends_with(".jpg") || name.ends_with(".png") || name.ends_with(".svg"));
+    if !SIZES.contains(&size.as_str()) || !valid_name {
+        return Err(not_found());
+    }
+    let dir = ctx.cfg.data_dir.join("images").join(&size);
+    let file = dir.join(&name);
+    if !file.exists() {
+        let url = format!("https://image.tmdb.org/t/p/{size}/{name}");
+        let resp = reqwest::get(&url).await?;
+        if !resp.status().is_success() {
+            return Err(not_found());
+        }
+        let bytes = resp.bytes().await?;
+        tokio::fs::create_dir_all(&dir).await?;
+        let tmp = dir.join(format!(".{name}.tmp"));
+        tokio::fs::write(&tmp, &bytes).await?;
+        tokio::fs::rename(&tmp, &file).await?;
+    }
+    let mime = if name.ends_with(".png") { "image/png" } else if name.ends_with(".svg") { "image/svg+xml" } else { "image/jpeg" };
+    let bytes = tokio::fs::read(&file).await?;
+    Ok((
+        [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "public, max-age=31536000, immutable")],
+        bytes,
+    )
+        .into_response())
+}
