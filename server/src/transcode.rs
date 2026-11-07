@@ -13,6 +13,7 @@ use std::{
 use tokio::{process::Child, sync::Mutex};
 
 pub const SEGMENT_SECS: f64 = 6.0;
+const REMUX_LEAD: f64 = 1.0;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Request {
@@ -178,10 +179,15 @@ impl Transcoder {
             None
         };
         if let Some(bounds) = remux {
+            let source = media.video.as_ref().map(|v| v.codec.clone()).unwrap_or_default();
             let plan = Plan {
-                device: "Remux (video copied)".into(),
-                codec: TargetCodec::H264,
-                container: "mpegts",
+                device: format!("Remux ({source} copied)"),
+                codec: match source.as_str() {
+                    "hevc" => TargetCodec::Hevc,
+                    "av1" => TargetCodec::Av1,
+                    _ => TargetCodec::H264,
+                },
+                container: "fmp4",
                 hw_decode: false,
                 encoder: "copy",
                 tonemap: None,
@@ -284,10 +290,35 @@ impl Transcoder {
     }
 }
 
+pub const REMUX_CODECS: &[&str] = &["h264", "hevc", "av1", "vp9"];
+
+/// The client said it decodes this exact stream (codec, depth, HDR), so it can be copied instead of re-encoded.
 fn remuxable(media: &MediaInfo, req: &Request) -> bool {
     let Some(v) = &media.video else { return false };
-    let accepts = req.video_copy.as_deref().is_some_and(|l| l.split(',').any(|c| c.trim() == "h264"));
-    accepts && v.codec == "h264" && v.bit_depth.unwrap_or(8) <= 8 && v.height as u32 <= req.max_height && !is_hdr(media)
+    let accepts = req.video_copy.as_deref().is_some_and(|l| l.split(',').any(|c| c.trim() == v.codec));
+    // Profile 5 has no HDR10 base layer, so it only looks right on a Dolby Vision decoder.
+    accepts && REMUX_CODECS.contains(&v.codec.as_str()) && v.dolby_vision_profile != Some(5) && v.height as u32 <= req.max_height
+}
+
+/// Top-level MP4 boxes as (type, offset, size).
+fn mp4_boxes(b: &[u8]) -> Vec<([u8; 4], usize, usize)> {
+    let mut out = vec![];
+    let mut i = 0;
+    while i + 8 <= b.len() {
+        let mut size = u32::from_be_bytes(b[i..i + 4].try_into().unwrap()) as usize;
+        let kind: [u8; 4] = b[i + 4..i + 8].try_into().unwrap();
+        if size == 1 && i + 16 <= b.len() {
+            size = u64::from_be_bytes(b[i + 8..i + 16].try_into().unwrap()) as usize;
+        } else if size == 0 {
+            size = b.len() - i;
+        }
+        if size < 8 || i + size > b.len() {
+            break;
+        }
+        out.push((kind, i, size));
+        i += size;
+    }
+    out
 }
 
 /// Segment starts on source keyframes, each at least `SEGMENT_SECS` long.
@@ -402,7 +433,7 @@ impl Session {
         if !path.exists() {
             return false;
         }
-        let name = format!("{n}.ts");
+        let name = format!("{n}.{}", self.ext());
         let Ok(mut dir) = tokio::fs::read_dir(&self.dir).await else { return false };
         while let Ok(Some(e)) = dir.next_entry().await {
             if !e.file_name().to_string_lossy().ends_with(".csv") {
@@ -460,6 +491,25 @@ impl Session {
         if let Some(cached) = self.init.lock().await.clone() {
             return Ok(cached);
         }
+        if self.plan.remux {
+            let first = {
+                let running = self.running.lock().await;
+                running.as_ref().map_or(0, |r| r.start_segment)
+            };
+            let path = self.segment(first).await?;
+            let bytes = tokio::fs::read(&path).await?;
+            let head: Vec<u8> = mp4_boxes(&bytes)
+                .into_iter()
+                .filter(|(k, ..)| k == b"ftyp" || k == b"moov")
+                .flat_map(|(_, o, s)| bytes[o..o + s].to_vec())
+                .collect();
+            if head.is_empty() {
+                bail!("segment {first} has no moov");
+            }
+            let head = Arc::new(head);
+            *self.init.lock().await = Some(head.clone());
+            return Ok(head);
+        }
         let path = self.dir.join("init.mp4");
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -516,6 +566,21 @@ impl Session {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    /// Segment payload. Remuxed segments are standalone MP4 files; serve only their fragments (the shared
+    /// header goes out once as init.mp4).
+    pub async fn media_segment(&self, n: u64) -> Result<Vec<u8>> {
+        let path = self.segment(n).await?;
+        let bytes = tokio::fs::read(&path).await?;
+        if !self.plan.remux {
+            return Ok(bytes);
+        }
+        Ok(mp4_boxes(&bytes)
+            .into_iter()
+            .filter(|(k, ..)| !matches!(k, b"ftyp" | b"moov" | b"mfra"))
+            .flat_map(|(_, o, s)| bytes[o..o + s].to_vec())
+            .collect())
     }
 
     fn highest_from(&self, start: u64) -> Option<u64> {
@@ -577,10 +642,17 @@ impl Session {
         a.extend(["-map".into(), "0:v:0".into(), "-c:v".into(), "copy".into()]);
         a.extend(self.audio_args());
         a.extend(["-sn".into(), "-dn".into(), "-map_metadata".into(), "-1".into(), "-map_chapters".into(), "-1".into()]);
-        a.extend(["-output_ts_offset".into(), format!("{start:.6}")]);
-        // The first run would otherwise be shifted by the B-frame delay and not line up with restarted runs.
-        a.extend(["-avoid_negative_ts".into(), "disabled".into()]);
-        a.extend(["-f".into(), "segment".into(), "-segment_format".into(), "mpegts".into()]);
+        // A constant 1 s lead keeps B-frame decode times positive, so every run uses identical timestamps.
+        a.extend(["-output_ts_offset".into(), format!("{:.6}", start + REMUX_LEAD)]);
+        a.extend(["-avoid_negative_ts".into(), "disabled".into(), "-strict".into(), "experimental".into()]);
+        if self.media.video.as_ref().is_some_and(|v| v.codec == "hevc") {
+            a.extend(["-tag:v".into(), "hvc1".into()]);
+        }
+        a.extend([
+            "-f".into(), "segment".into(),
+            "-segment_format".into(), "mp4".into(),
+            "-segment_format_options".into(), "movflags=+frag_keyframe+empty_moov+default_base_moof+frag_discont+delay_moov".into(),
+        ]);
         // Cut times are compared before the output offset is applied, so they are relative to `start`.
         let times: Vec<String> = self.bounds[i + 1..].iter().map(|t| format!("{:.3}", t - start)).collect();
         if !times.is_empty() {
@@ -592,7 +664,7 @@ impl Session {
             "-segment_start_number".into(), n.to_string(),
             "-segment_list".into(), self.dir.join(format!("run-{n}.csv")).display().to_string(),
             "-segment_list_type".into(), "csv".into(),
-            self.dir.join("%d.ts").display().to_string(),
+            self.dir.join("%d.m4s").display().to_string(),
         ]);
         a
     }

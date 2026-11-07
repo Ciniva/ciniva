@@ -638,17 +638,13 @@ async fn transcode_segment(State(ctx): State<Shared>, Path((sid, segment)): Path
         let bytes = s.init_segment().await?;
         return Ok(([(header::CONTENT_TYPE, "video/mp4"), (header::CACHE_CONTROL, "no-store")], bytes.to_vec()).into_response());
     }
-    let path = {
-        let n: u64 = segment
-            .strip_suffix(".ts")
-            .or_else(|| segment.strip_suffix(".m4s"))
-            .and_then(|n| n.parse().ok())
-            .ok_or_else(not_found)?;
-        s.segment(n).await?
-    };
-    let bytes = tokio::fs::read(&path).await?;
-    let ctype = if segment.ends_with(".ts") { "video/mp2t" } else { "video/mp4" };
-    let _ = s.content_type();
+    let n: u64 = segment
+        .strip_suffix(".ts")
+        .or_else(|| segment.strip_suffix(".m4s"))
+        .and_then(|n| n.parse().ok())
+        .ok_or_else(not_found)?;
+    let bytes = s.media_segment(n).await?;
+    let ctype = s.content_type();
     Ok(([(header::CONTENT_TYPE, ctype), (header::CACHE_CONTROL, "no-store")], bytes).into_response())
 }
 
