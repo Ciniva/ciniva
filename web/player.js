@@ -207,7 +207,7 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
   function showInfo() {
     const parts = [];
     if (state.mode === 'direct') parts.push('Direct play');
-    else if (state.plan?.remux) parts.push(`Direct stream · ${(file.probe.video?.codec || '').toUpperCase()} untouched`);
+    else if (state.plan?.remux) parts.push(`Direct stream · ${(file.probe.video?.codec || '').toUpperCase()}`);
     else if (state.plan) {
       const p = state.plan;
       parts.push(`Transcode · ${p.codec.toUpperCase()} on ${p.device}`);
