@@ -1,5 +1,5 @@
 import { api, url, pref, setPref } from './api.js';
-import { h, icon, clock, audioLabel, langName, toast } from './dom.js';
+import { h, icon, clock, audioLabel, langName, toast, modal } from './dom.js';
 
 const QUALITIES = [
   { id: 'auto', label: 'Original' },
@@ -106,6 +106,22 @@ function seekStep(e) {
   return s.short;
 }
 
+function askResume(saved, duration) {
+  return new Promise((resolve) => {
+    let choice = null;
+    const pick = (v) => { choice = v; close(); };
+    const { close } = modal(h('div.resume',
+      h('h2', 'Continue watching?'),
+      duration ? h('div.resume-bar', h('div', { style: { width: `${Math.min(100, (saved / duration) * 100)}%` } })) : null,
+      h('p.muted', `You stopped at ${clock(saved)}${duration ? ` of ${clock(duration)}` : ''}.`),
+      h('div.resume-actions',
+        h('button.btn.primary', { onclick: () => pick(saved), autofocus: true }, icon('play'), ` Resume from ${clock(saved)}`),
+        h('button.btn', { onclick: () => pick(0) }, 'Start over'),
+      ),
+    ), { onclose: () => resolve(choice) });
+  });
+}
+
 export async function openPlayer({ fileId, title, subtitle, startAt, next, reuseHistory }) {
   const file = await api(`/files/${fileId}`);
   if (!file.probe) {
@@ -114,7 +130,12 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
   }
   const probe = file.probe;
   const duration = file.duration || probe.duration || 0;
-  let start = startAt ?? (!file.watched && file.position_ms ? file.position_ms / 1000 : 0);
+  let start = startAt;
+  if (start === undefined) {
+    const saved = !file.watched && file.position_ms ? file.position_ms / 1000 : 0;
+    start = saved >= 30 && (!duration || saved < duration - 15) ? await askResume(saved, duration) : 0;
+    if (start === null) return;
+  }
   if (duration && start > duration - 15) start = 0;
 
   const state = { mode: null, hls: null, session: null, plan: null, forceTranscode: false, closed: false };
@@ -208,7 +229,21 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
     video.load();
   }
 
+  // Safari's native HLS ignores a seek made at loadedmetadata, so keep re-applying it until playback is
+  // actually there, and save no progress before that (it would overwrite the resume point).
+  let pendingSeek = null;
+  function applyPendingSeek() {
+    if (pendingSeek === null || video.readyState < 1) return;
+    if (Math.abs(video.currentTime - pendingSeek) < 3) {
+      pendingSeek = null;
+      return;
+    }
+    if (!video.seeking) video.currentTime = pendingSeek;
+  }
+  for (const ev of ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'timeupdate']) video.addEventListener(ev, applyPendingSeek);
+
   async function load(position) {
+    pendingSeek = position > 1 ? position : null;
     message.textContent = '';
     root.classList.add('loading');
     await teardown();
@@ -282,10 +317,10 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
   let lastReport = 0;
   function report(force) {
     const t = video.currentTime;
-    if (!total() || t < 1 || state.closed && !force) return;
-    if (!force && Date.now() - lastReport < 10000) return;
+    if (!total() || t < 1 || pendingSeek !== null || state.closed && !force) return Promise.resolve();
+    if (!force && Date.now() - lastReport < 10000) return Promise.resolve();
     lastReport = Date.now();
-    api(`/files/${fileId}/progress`, { method: 'PUT', keepalive: true, body: { position_ms: Math.floor(t * 1000), duration_ms: Math.floor(total() * 1000) } }).catch(() => {});
+    return api(`/files/${fileId}/progress`, { method: 'PUT', keepalive: true, body: { position_ms: Math.floor(t * 1000), duration_ms: Math.floor(total() * 1000) } }).catch(() => {});
   }
 
   function render() {
@@ -466,7 +501,7 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
 
   async function close({ fromHistory, keepHistory } = {}) {
     if (state.closed) return;
-    report(true);
+    const saved = report(true);
     state.closed = true;
     document.removeEventListener('keydown', onKey);
     window.removeEventListener('popstate', onPop);
@@ -477,6 +512,7 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
     root.remove();
     document.body.classList.remove('playing');
     if (!fromHistory && !keepHistory) history.back();
+    await Promise.race([saved, new Promise((r) => setTimeout(r, 2000))]);
     window.dispatchEvent(new CustomEvent('ciniva:player-closed'));
   }
 

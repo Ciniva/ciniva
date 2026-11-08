@@ -155,6 +155,7 @@ struct MovieCard {
     rating: Option<f64>,
     added_at: String,
     #[sqlx(flatten)]
+    #[serde(flatten)]
     progress: Progress,
 }
 
@@ -223,6 +224,7 @@ struct FileView {
     probe: Option<SqlJson<MediaInfo>>,
     added_at: String,
     #[sqlx(flatten)]
+    #[serde(flatten)]
     progress: Progress,
 }
 

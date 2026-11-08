@@ -223,10 +223,15 @@ function fileDetails(f) {
 
 function playButtons(f, play) {
   const resume = f.position_ms > 0 && !f.watched;
-  return [
-    h('button.btn.primary', { onclick: () => play(resume ? undefined : 0) }, icon('play'), resume ? ` Resume ${clock(f.position_ms / 1000)}` : ' Play'),
-    resume ? h('button.btn', { onclick: () => play(0) }, 'From start') : null,
-  ];
+  return [h('button.btn.primary', { onclick: () => play(undefined) }, icon('play'), resume ? ' Resume' : ' Play')];
+}
+
+function resumeLine(f) {
+  if (!f || f.watched || !f.position_ms || !f.duration_ms) return null;
+  return h('div.resume-line',
+    h('div.resume-bar', h('div', { style: { width: `${Math.min(100, (f.position_ms / f.duration_ms) * 100)}%` } })),
+    h('span.muted.small', `${clock((f.duration_ms - f.position_ms) / 1000)} left · stopped at ${clock(f.position_ms / 1000)}`),
+  );
 }
 
 async function setWatched(files, watched) {
@@ -245,7 +250,7 @@ async function movieView(el, id) {
       h('button.btn', { onclick: async () => { await setWatched(m.files, !watched); rerender(); } }, icon('check'), watched ? ' Mark unwatched' : ' Mark watched'),
       file ? h('button.btn.ghost', { onclick: () => matchDialog(m.files, { kind: 'movie', query: m.title, year: m.year }, rerender) }, icon('wrench'), ' Fix match') : null,
     );
-    append(clear(details), file ? fileDetails(file) : h('p.muted', 'No playable file.'));
+    append(clear(details), resumeLine(file), file ? fileDetails(file) : h('p.muted', 'No playable file.'));
   };
   const versions = m.files.length > 1
     ? h('select.versions', { 'aria-label': 'Version', onchange: (e) => { file = m.files.find((f) => f.id === Number(e.target.value)); renderFile(); } },
@@ -298,7 +303,8 @@ async function showView(el, id, params) {
         f?.watched ? h('span.badge-watched', icon('check')) : null),
       h('div.ep-body',
         h('div.ep-title', `${e.episode_number}. ${e.title || `Episode ${e.episode_number}`}`),
-        h('div.ep-meta', [e.air_date, e.runtime ? `${e.runtime}m` : null, f ? techBadges(f.probe).slice(0, 2).join(' ') : 'Not in library'].filter(Boolean).join(' · ')),
+        h('div.ep-meta', [e.air_date, e.runtime ? `${e.runtime}m` : null, f ? techBadges(f.probe).slice(0, 2).join(' ') : 'Not in library',
+          f && !f.watched && f.position_ms ? `${clock((f.duration_ms - f.position_ms) / 1000)} left` : null].filter(Boolean).join(' · ')),
         e.overview ? h('p.ep-overview', e.overview) : null,
       ),
       f ? h('div.ep-actions',

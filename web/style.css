@@ -148,6 +148,11 @@ input:focus { border-color: var(--accent); }
 .detail { position: relative; display: grid; grid-template-columns: clamp(140px, 20vw, 260px) 1fr; gap: clamp(18px, 3vw, 40px); padding: 0 var(--gutter); margin-top: clamp(-200px, -16vw, -80px) !important; }
 .detail-poster .poster { border-radius: var(--radius); overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,.6); background: var(--surface); }
 .detail-body { display: grid; gap: 14px; align-content: start; padding-top: clamp(40px, 9vw, 130px); max-width: 860px; }
+.resume-line { display: grid; gap: 6px; max-width: 420px; }
+.resume-bar { height: 4px; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
+.resume-bar > div { height: 100%; background: var(--accent); }
+.resume { display: grid; gap: 14px; padding-right: 24px; }
+.resume-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
 .tagline { font-style: italic; color: var(--muted); }
 .overview { color: #cfd4de; max-width: 72ch; }
 .versions { max-width: 100%; }
