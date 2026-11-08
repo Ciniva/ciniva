@@ -99,9 +99,13 @@ function login(error) {
 }
 
 let statusTimer;
+let loadedVersion = null;
 async function refreshStatus() {
   try {
     const s = await api('/status');
+    // An open tab keeps running the old app after an upgrade; reload once nothing is playing.
+    loadedVersion ??= s.version;
+    if (s.version !== loadedVersion && !document.querySelector('.player')) location.reload();
     const n = s.counts.unmatched + s.counts.pending;
     fixBadge.textContent = n ? String(n) : '';
     clearTimeout(statusTimer);

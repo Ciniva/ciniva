@@ -288,7 +288,7 @@ input.num { width: 64px; height: 32px; padding: 0 8px; }
 .player.loading .spinner { display: block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .player-message:not(:empty) { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); max-width: min(520px, 90vw); padding: 16px 22px; border-radius: 12px; background: rgba(20,22,28,.92); text-align: center; }
-.upnext { position: absolute; right: clamp(16px, 3vw, 36px); bottom: 120px; padding: 18px; border-radius: 14px; background: rgba(20,22,28,.92); display: none; gap: 8px; max-width: 360px; }
+.upnext { position: absolute; z-index: 3; right: clamp(16px, 3vw, 36px); bottom: 140px; box-shadow: 0 12px 40px rgba(0,0,0,.6); padding: 18px; border-radius: 14px; background: rgba(20,22,28,.92); display: none; gap: 8px; max-width: 360px; }
 .upnext.show { display: grid; }
 .upnext-label { color: var(--accent); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
 .upnext-title { font-weight: 650; }
