@@ -202,7 +202,34 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
   document.body.classList.add('playing');
   if (reuseHistory) history.replaceState({ player: true }, ''); else history.pushState({ player: true }, '');
 
-  const total = () => (isFinite(video.duration) && video.duration > 0 ? video.duration : duration);
+  // The file's own duration: after a failed stream the browser truncates video.duration to what was buffered.
+  const total = () => duration || (isFinite(video.duration) && video.duration > 0 ? video.duration : 0);
+
+  // A lost stream (server restart, network drop) is rebuilt at the last good position instead of ending.
+  let lastGood = 0;
+  let recovering = false;
+  let recoveredAt = 0;
+  let recoveries = 0;
+  async function recover() {
+    if (state.closed || recovering) return;
+    if (Date.now() - recoveredAt > 60000) recoveries = 0;
+    if (recoveries >= 12) {
+      fail('Lost connection to the server.');
+      return;
+    }
+    recovering = true;
+    recoveries++;
+    recoveredAt = Date.now();
+    message.textContent = '';
+    root.classList.add('loading');
+    const at = lastGood;
+    if (recoveries > 1) await new Promise((r) => setTimeout(r, 2000));
+    for (let attempt = 0; attempt < 20 && !state.closed; attempt++) {
+      if (await load(at, { quiet: true })) break;
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    recovering = false;
+  }
 
   function showInfo() {
     const parts = [];
@@ -242,12 +269,13 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
   }
   for (const ev of ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'timeupdate']) video.addEventListener(ev, applyPendingSeek);
 
-  async function load(position) {
+  async function load(position, { quiet } = {}) {
     pendingSeek = position > 1 ? position : null;
+    if (position) lastGood = position;
     message.textContent = '';
     root.classList.add('loading');
     await teardown();
-    if (state.closed) return;
+    if (state.closed) return true;
     const direct = !state.forceTranscode && quality === 'auto' && directPlayable(file, audio);
     if (direct) {
       state.mode = 'direct';
@@ -260,12 +288,12 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
       try {
         r = await api(`/files/${fileId}/transcode`, { method: 'POST', body: transcodeRequest(file, quality, audio) });
       } catch (e) {
-        fail(`Could not start transcoding: ${e.message}`);
-        return;
+        if (!quiet) fail(`Could not start transcoding: ${e.message}`);
+        return false;
       }
       if (state.closed) {
         api(`/transcode/${r.session}`, { method: 'DELETE' }).catch(() => {});
-        return;
+        return true;
       }
       state.session = r.session;
       state.plan = r.plan;
@@ -276,8 +304,8 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
         const hls = new Hls({ startPosition: position || 0, maxBufferLength: 30, backBufferLength: 60, fragLoadingMaxRetry: 6 });
         state.hls = hls;
         hls.on(Hls.Events.ERROR, (_, d) => {
-          if (!d.fatal) return;
-          if (d.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+          if (!d.fatal || state.hls !== hls) return;
+          if (d.type === Hls.ErrorTypes.NETWORK_ERROR) recover();
           else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
           else fail(`Playback error: ${d.details}`);
         });
@@ -288,12 +316,13 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
         video.addEventListener('loadedmetadata', () => { if (position) video.currentTime = position; }, { once: true });
       } else {
         fail('This browser cannot play HLS streams.');
-        return;
+        return true;
       }
     }
     showInfo();
     applySubtitle();
     video.play().catch(() => root.classList.add('paused'));
+    return true;
   }
 
   function fail(text) {
@@ -415,7 +444,11 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
   video.addEventListener('waiting', () => root.classList.add('loading'));
   video.addEventListener('seeking', () => root.classList.add('loading'));
   for (const ev of ['playing', 'seeked', 'canplay']) video.addEventListener(ev, () => root.classList.remove('loading'));
-  video.addEventListener('timeupdate', () => { render(); report(false); });
+  video.addEventListener('timeupdate', () => {
+    if (!video.seeking && pendingSeek === null && video.currentTime > 0) lastGood = video.currentTime;
+    render();
+    report(false);
+  });
   video.addEventListener('progress', render);
   video.addEventListener('durationchange', render);
   video.addEventListener('volumechange', () => {
@@ -425,14 +458,20 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
     setPref('muted', video.muted ? '1' : '0');
   });
   video.addEventListener('error', () => {
-    if (state.mode === 'direct') {
+    if (!video.error || state.closed) return;
+    const network = video.error.code === MediaError.MEDIA_ERR_NETWORK;
+    if (state.mode === 'direct' && !network) {
       state.forceTranscode = true;
-      load(video.currentTime || start);
+      load(lastGood || start);
     } else if (!state.hls) {
-      fail('Playback failed.');
+      recover();
     }
   });
   video.addEventListener('ended', () => {
+    if (total() && lastGood < total() - 30) {
+      recover();
+      return;
+    }
     api(`/files/${fileId}/progress`, { method: 'PUT', body: { position_ms: Math.floor(total() * 1000), duration_ms: Math.floor(total() * 1000) } }).catch(() => {});
     showUpNext();
   });
