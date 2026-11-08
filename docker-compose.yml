@@ -52,7 +52,7 @@ services:
 
   # Library folders are read-only here: qBittorrent can keep seeding them but cannot change or delete them.
   qbittorrent:
-    image: ciniva-qbittorrent:5.1.4
+    image: ghcr.io/ciniva/qbittorrent:latest
     build: docker/qbittorrent
     container_name: qbittorrent
     restart: unless-stopped
@@ -76,7 +76,7 @@ services:
         aliases: [qbittorrent-internal]
 
   prowlarr:
-    image: ciniva-prowlarr:2.7.0
+    image: ghcr.io/ciniva/prowlarr:latest
     build: docker/prowlarr
     container_name: prowlarr
     restart: unless-stopped
@@ -96,8 +96,7 @@ services:
 
   # Plugins live on the internal network only: no internet, and only the secrets they need.
   ciniva-qbittorrent:
-    image: ciniva-plugin-qbittorrent:0.1.0
-    build: plugins/qbittorrent
+    image: ghcr.io/ciniva/ciniva-plugin-qbittorrent:latest
     container_name: ciniva-qbittorrent
     restart: unless-stopped
     profiles: [downloads]
@@ -115,8 +114,7 @@ services:
 
   # Jellyfin-compatible API for TV apps (Jellyfin, Swiftfin, Infuse…). Reachable from the LAN on 8096.
   ciniva-jellyfin:
-    image: ciniva-plugin-jellyfin:0.1.0
-    build: plugins/jellyfin
+    image: ghcr.io/ciniva/ciniva-plugin-jellyfin:latest
     container_name: ciniva-jellyfin
     restart: unless-stopped
     profiles: [tv]

@@ -74,11 +74,11 @@ their settings, pages and actions declaratively and every client (web, macOS) dr
 [docs/plugins.md](docs/plugins.md). Plugins sit on an internal Docker network with no internet access and receive only
 the service key, so a compromised plugin can reach Ciniva's API and nothing else.
 
-- `plugins/qbittorrent`: a Downloads page with live progress, add magnet/URL/.torrent, pause/resume, sequential
+- [ciniva-plugin-qbittorrent](https://github.com/Ciniva/ciniva-plugin-qbittorrent): a Downloads page with live progress, add magnet/URL/.torrent, pause/resume, sequential
   ("download in order"), per-file priorities, Prowlarr search ranked by your preferred quality, languages and size,
   and "Find episodes"/"Find releases" on show, season and movie pages. When a download finishes it rescans just that
   folder (it appears within seconds) and notifies signed-in clients.
-- `plugins/jellyfin`: a Jellyfin-compatible API on port 8096 so Jellyfin apps (Android TV, webOS, Tizen, Roku), Swiftfin,
+- [ciniva-plugin-jellyfin](https://github.com/Ciniva/ciniva-plugin-jellyfin): a Jellyfin-compatible API on port 8096 so Jellyfin apps (Android TV, webOS, Tizen, Roku), Swiftfin,
   Infuse and Findroid can browse, play and sync progress. Add the server as `http://<server>:8096` and sign in with your
   Ciniva account.
 
@@ -97,3 +97,10 @@ qBittorrent and Prowlarr run in their own containers built from pinned, checksum
 
 - macOS: `apps/macos` (`./build.sh`, then `open build/Ciniva.app`). Direct-plays every format through mpv or
   AVFoundation (Dolby Vision, HDR10, Atmos), with resume, credits/Up next, episode navigation and plugin pages.
+
+## Images
+
+GitHub Actions tests the server and publishes images to the GitHub container registry on every push to `main`
+(`latest` and `sha-<short>`; `X.Y.Z` for `vX.Y.Z` tags): `ghcr.io/ciniva/ciniva`, `ghcr.io/ciniva/qbittorrent`,
+`ghcr.io/ciniva/prowlarr`. Each plugin repository publishes its own image the same way. The packages are private, so a
+server needs `docker login ghcr.io` with a token that has `read:packages` before it can pull them.
