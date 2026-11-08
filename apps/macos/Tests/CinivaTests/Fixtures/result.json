@@ -1,0 +1,2 @@
+{ "message": "Added 1 torrent", "tone": "success", "refresh": true, "navigate": { "page": "torrent", "params": { "info_hash": "abc", "n": 2 } },
+  "view": { "title": "Search results", "blocks": [ { "type": "list", "items": [ { "id": "r1", "title": "Result 1" } ] } ] } }

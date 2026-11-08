@@ -1,0 +1,33 @@
+{
+  "title": "Downloads",
+  "subtitle": "qBittorrent 4.6 · 3 active",
+  "refresh": 5,
+  "blocks": [
+    { "type": "text", "text": "Connected to qBittorrent.", "tone": "success" },
+    { "type": "text", "text": "Plain note without a tone." },
+    { "type": "stats", "items": [ { "label": "Downloading", "value": 3 }, { "label": "Speed", "value": "12.4 MB/s" }, { "label": "Ratio", "value": 1.25 } ] },
+    { "type": "actions", "items": [
+      { "label": "Pause all", "icon": "pause", "call": { "method": "POST", "path": "torrents/pause" } },
+      { "label": "Search", "icon": "search", "tone": "primary", "navigate": { "page": "search", "params": { "query_text": "rick", "season_no": 1 } } },
+      { "label": "Delete finished", "icon": "trash", "tone": "danger", "confirm": "Delete all finished torrents?", "call": { "method": "DELETE", "path": "/torrents/finished", "body": { "with_files": false } } }
+    ] },
+    { "type": "form", "id": "add", "fields": [
+      { "name": "magnet", "label": "Magnet link", "kind": "text", "placeholder": "magnet:?xt=…", "required": true },
+      { "name": "secret", "label": "Password", "kind": "password" },
+      { "name": "limit_kb", "label": "Speed limit (KB/s)", "kind": "number", "value": 500, "help": "0 means unlimited" },
+      { "name": "category", "label": "Category", "kind": "select", "value": "tv", "options": [ { "value": "tv", "label": "TV" }, { "value": "movies", "label": "Movies" }, { "value": 3, "label": "Other (3)" } ] },
+      { "name": "start_paused", "label": "Start paused", "kind": "toggle", "value": false },
+      { "name": "torrent_file", "label": "Torrent file", "kind": "file" },
+      { "name": "notes", "label": "Notes", "kind": "textarea", "value": "line one" }
+    ], "submit": { "label": "Add", "call": { "method": "POST", "path": "torrents/add", "body": { "source": "ui", "limit_kb": 1 } } } },
+    { "type": "list", "id": "torrents", "items": [
+      { "id": "abc123", "title": "Rick.and.Morty.S01E05.1080p.mkv", "subtitle": "312 MB of 540 MB · 2.1 MB/s · 2m left", "image": "/owhkU6KRqdXoUQpjV8uyZGPtX58.jpg", "progress": 0.58,
+        "badges": [ { "text": "Downloading", "tone": "info" }, { "text": "TV" } ],
+        "actions": [ { "label": "Pause", "icon": "pause", "call": { "method": "POST", "path": "torrents/abc123/pause" } }, { "label": "Remove", "icon": "trash", "tone": "danger", "confirm": "Remove this torrent?", "call": { "method": "DELETE", "path": "torrents/abc123" } } ],
+        "link": { "page": "torrent", "params": { "hash": "abc123" } } },
+      { "id": 42, "title": "Sintel.2010.2160p.mp4", "progress": 1, "badges": [ { "text": "Done", "tone": "success" }, { "text": "Stalled", "tone": "warning" }, { "text": "Error", "tone": "error" } ] }
+    ] },
+    { "type": "list", "items": [], "empty": "No finished downloads." },
+    { "type": "chart", "data": [1, 2, 3] }
+  ]
+}
