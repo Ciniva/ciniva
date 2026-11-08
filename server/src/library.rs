@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, RwLock};
 
 pub struct Ctx {
     pub db: SqlitePool,
-    pub tmdb: Option<Tmdb>,
+    tmdb: RwLock<Option<Arc<Tmdb>>>,
     pub cfg: Config,
     pub hw: Arc<Hardware>,
     pub transcoder: Arc<Transcoder>,
@@ -28,6 +28,7 @@ pub struct Ctx {
     scan_lock: Mutex<()>,
     trickplay_lock: Mutex<()>,
     credits_lock: Mutex<()>,
+    pub setup_lock: Mutex<()>,
     pub status: RwLock<ScanStatus>,
 }
 
@@ -65,7 +66,7 @@ const SEQUEL_MIN: f64 = 0.92;
 
 impl Ctx {
     pub fn new(db: SqlitePool, cfg: Config, hw: Arc<Hardware>) -> Arc<Self> {
-        let tmdb = cfg.tmdb_key.clone().map(|k| Tmdb::new(k, cfg.language.clone()));
+        let tmdb = RwLock::new(cfg.tmdb_key.clone().map(|k| Arc::new(Tmdb::new(k, cfg.language.clone()))));
         let keyframes = crate::transcode::Keyframes::new(cfg.ffprobe.clone(), cfg.data_dir.join("keyframes"));
         let transcoder = Transcoder::new(hw.clone(), cfg.data_dir.join("transcode"), keyframes.clone());
         Arc::new(Self {
@@ -78,8 +79,17 @@ impl Ctx {
             scan_lock: Mutex::new(()),
             trickplay_lock: Mutex::new(()),
             credits_lock: Mutex::new(()),
+            setup_lock: Mutex::new(()),
             status: Default::default(),
         })
+    }
+
+    pub async fn tmdb(&self) -> Option<Arc<Tmdb>> {
+        self.tmdb.read().await.clone()
+    }
+
+    pub async fn set_tmdb_key(&self, key: Option<String>) {
+        *self.tmdb.write().await = key.map(|k| Arc::new(Tmdb::new(k, self.cfg.language.clone())));
     }
 
     async fn set_phase(&self, phase: &str, done: usize, total: usize) {
@@ -366,7 +376,7 @@ async fn scan_inner(ctx: &Arc<Ctx>) -> Result<ScanReport> {
         .await;
     report.probed = total;
 
-    if ctx.tmdb.is_some() {
+    if ctx.tmdb().await.is_some() {
         let pending: Vec<(i64, String, String, Option<f64>)> =
             sqlx::query_as("SELECT id, path, guess, duration FROM files WHERE kind = 'pending'").fetch_all(&ctx.db).await?;
         let total = pending.len();
@@ -407,7 +417,8 @@ async fn scan_inner(ctx: &Arc<Ctx>) -> Result<ScanReport> {
 }
 
 async fn match_file(ctx: &Ctx, id: i64, path: &str, guess: &str, duration: Option<f64>) -> Result<bool> {
-    let tmdb = ctx.tmdb.as_ref().expect("tmdb configured");
+    let Some(tmdb) = ctx.tmdb().await else { anyhow::bail!("TMDB is not configured") };
+    let tmdb = tmdb.as_ref();
     let manual: Option<(String, i64, Option<i64>, Option<i64>)> =
         sqlx::query_as("SELECT kind, tmdb_id, season, episode FROM manual_matches WHERE path = ?")
             .bind(path)
@@ -663,7 +674,8 @@ async fn store_movie(ctx: &Ctx, tmdb_id: i64) -> Result<i64> {
     if let Some((id,)) = sqlx::query_as::<_, (i64,)>("SELECT id FROM movies WHERE tmdb_id = ?").bind(tmdb_id).fetch_optional(&ctx.db).await? {
         return Ok(id);
     }
-    let m = ctx.tmdb.as_ref().unwrap().movie(tmdb_id).await?;
+    let Some(tmdb) = ctx.tmdb().await else { anyhow::bail!("TMDB is not configured") };
+    let m = tmdb.movie(tmdb_id).await?;
     sqlx::query(
         "INSERT INTO movies (tmdb_id, title, original_title, year, overview, tagline, poster_path, backdrop_path, runtime, rating, genres, release_date, cast_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (tmdb_id) DO NOTHING",
@@ -679,7 +691,8 @@ async fn store_movie(ctx: &Ctx, tmdb_id: i64) -> Result<i64> {
 }
 
 async fn store_episodes(ctx: &Ctx, tv_id: i64, episodes: &[(i64, i64)]) -> Result<Vec<i64>> {
-    let tmdb = ctx.tmdb.as_ref().unwrap();
+    let Some(tmdb) = ctx.tmdb().await else { anyhow::bail!("TMDB is not configured") };
+    let tmdb = tmdb.as_ref();
     let show_id = match sqlx::query_as::<_, (i64,)>("SELECT id FROM shows WHERE tmdb_id = ?").bind(tv_id).fetch_optional(&ctx.db).await? {
         Some((id,)) => id,
         None => {

@@ -1,4 +1,4 @@
-import { api, img, token, setToken, pref, setPref, AuthError } from './api.js';
+import { api, img, pref, setPref, AuthError } from './api.js';
 import { h, append, clear, icon, duration, bytes, fileName, progressBar, poster, movieCard, showCard, row, techBadges, toast, clock, modal } from './dom.js';
 import { openPlayer, seekSteps, SEEK_DEFAULTS } from './player.js';
 import { fixView, matchDialog } from './fix.js';
@@ -74,28 +74,105 @@ async function rerender() {
   window.scrollTo(0, y);
 }
 
-function login(error) {
-  app.replaceChildren(h('div.login',
-    h('form.login-card', {
-      onsubmit: async (e) => {
-        e.preventDefault();
-        setToken(e.target.token.value.trim());
-        try {
-          await api('/status');
-          start();
-        } catch (err) {
-          login(err instanceof AuthError ? 'That token was not accepted.' : err.message);
-        }
-      },
+let me = null;
+
+function authCard(...content) {
+  return h('div.login', h('div.login-card', h('img.login-logo', { src: 'icon.svg', alt: '' }), ...content));
+}
+
+function authForm({ title, intro, step, fields, submit, onsubmit, extra }) {
+  const error = h('p.error');
+  const button = h('button.btn.primary', { type: 'submit' }, submit);
+  const form = h('form.login-form', {
+    onsubmit: async (e) => {
+      e.preventDefault();
+      error.textContent = '';
+      button.disabled = true;
+      try {
+        await onsubmit(Object.fromEntries(new FormData(form)));
+      } catch (err) {
+        error.textContent = err.message;
+        button.disabled = false;
+      }
     },
-      h('img.login-logo', { src: 'icon.svg', alt: '' }),
-      h('h1', 'Ciniva'),
-      h('p', 'Enter the access token from the server’s CINIVA_TOKEN setting.'),
-      h('input', { name: 'token', type: 'password', placeholder: 'Access token', autocomplete: 'current-password', required: true, autofocus: true }),
-      error ? h('p.error', error) : null,
-      h('button.btn.primary', { type: 'submit' }, 'Sign in'),
-    ),
+  }, fields, error, button, extra);
+  app.replaceChildren(authCard(
+    step ? h('div.step', step) : null,
+    h('h1', title),
+    intro ? h('p', intro) : null,
+    form,
   ));
+  form.querySelector('input')?.focus();
+}
+
+function field(name, label, type = 'text', attrs = {}) {
+  return h('label.auth-field', h('span', label), h('input', { name, type, required: true, ...attrs }));
+}
+
+function setupAdmin() {
+  authForm({
+    step: 'Step 1 of 2',
+    title: 'Welcome to Ciniva',
+    intro: 'Create the administrator account. You will use it to sign in here, in the apps and on TVs.',
+    fields: [
+      field('username', 'Username', 'text', { autocomplete: 'username', maxlength: 64 }),
+      field('password', 'Password', 'password', { autocomplete: 'new-password', minlength: 8 }),
+      field('confirm', 'Repeat password', 'password', { autocomplete: 'new-password', minlength: 8 }),
+    ],
+    submit: 'Create account',
+    onsubmit: async (v) => {
+      if (v.password !== v.confirm) throw new Error('The passwords do not match');
+      const r = await api('/setup/admin', { method: 'POST', body: { username: v.username, password: v.password } });
+      me = r.user;
+      start();
+    },
+  });
+}
+
+function setupTmdb(fromEnv) {
+  authForm({
+    step: 'Step 2 of 2',
+    title: 'Connect TMDB',
+    intro: h('span', 'Ciniva identifies your movies and shows with The Movie Database. Create a free account, then copy the ',
+      h('b', 'API Read Access Token'), ' (or API key) from ',
+      h('a.link', { href: 'https://www.themoviedb.org/settings/api', target: '_blank', rel: 'noopener' }, 'themoviedb.org/settings/api'), '.'),
+    fields: [field('api_key', 'TMDB API key or read access token', 'password', { autocomplete: 'off', required: !fromEnv, placeholder: fromEnv ? 'Already set on the server; leave empty to keep it' : '' })],
+    submit: 'Save and scan library',
+    extra: h('button.btn.ghost.skip', { type: 'button', onclick: () => { setPref('tmdbSkipped', '1'); start(); } }, fromEnv ? 'Keep the server’s key' : 'Skip for now'),
+    onsubmit: async (v) => {
+      if (!v.api_key && fromEnv) { setPref('tmdbSkipped', '1'); return start(); }
+      await api('/settings/tmdb', { method: 'PUT', body: { api_key: v.api_key } });
+      toast('TMDB connected. Scanning your library…');
+      start();
+    },
+  });
+}
+
+function login(message) {
+  authForm({
+    title: 'Sign in to Ciniva',
+    intro: message,
+    fields: [
+      field('username', 'Username', 'text', { autocomplete: 'username' }),
+      field('password', 'Password', 'password', { autocomplete: 'current-password' }),
+    ],
+    submit: 'Sign in',
+    onsubmit: async (v) => {
+      try {
+        const r = await api('/auth/login', { method: 'POST', body: { username: v.username, password: v.password } });
+        me = r.user;
+      } catch (e) {
+        throw e instanceof AuthError ? new Error('Wrong username or password') : e;
+      }
+      start();
+    },
+  });
+}
+
+async function signOut() {
+  await api('/auth/logout', { method: 'POST' }).catch(() => {});
+  me = null;
+  login('You are signed out.');
 }
 
 let statusTimer;
@@ -117,11 +194,20 @@ async function refreshStatus() {
 }
 
 async function start() {
+  let setup;
   try {
-    await api('/status');
+    setup = await api('/setup');
   } catch (e) {
-    if (e instanceof AuthError) return login(token() ? 'That token was not accepted.' : null);
+    app.replaceChildren(authCard(h('h1', 'Ciniva'), h('p.error', `Cannot reach the server: ${e.message}`), h('button.btn.primary', { onclick: start }, 'Try again')));
+    return;
   }
+  if (setup.needs_admin) return setupAdmin();
+  try {
+    me = (await api('/me')).user || null;
+  } catch (e) {
+    if (e instanceof AuthError) return login();
+  }
+  if (me?.admin && !setup.tmdb_configured && pref('tmdbSkipped', '') !== '1') return setupTmdb(false);
   app.replaceChildren(nav, main);
   refreshStatus();
   route();
@@ -449,8 +535,95 @@ async function settingsView(el) {
         ])),
       h('button.btn.small', { onclick: () => { for (const k of Object.keys(SEEK_DEFAULTS)) setPref(`seek.${k}`, SEEK_DEFAULTS[k]); rerender(); } }, 'Reset seek steps'),
       h('p.muted', `Server ${status.version}`),
-      h('button.btn', { onclick: () => { setToken(''); login(); } }, 'Sign out'),
     ),
+    accountPanel(),
+    me?.admin ? await usersPanel() : null,
+    me?.admin ? tmdbPanel(status.tmdb) : null,
+  );
+}
+
+function accountPanel() {
+  const form = h('form.inline-form', {
+    onsubmit: async (e) => {
+      e.preventDefault();
+      const v = Object.fromEntries(new FormData(form));
+      try {
+        await api('/me/password', { method: 'PUT', body: { current: v.current, new: v.new } });
+        form.reset();
+        toast('Password changed');
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    },
+  },
+    h('input', { name: 'current', type: 'password', placeholder: 'Current password', autocomplete: 'current-password', required: true }),
+    h('input', { name: 'new', type: 'password', placeholder: 'New password (8+ characters)', autocomplete: 'new-password', minlength: 8, required: true }),
+    h('button.btn', { type: 'submit' }, 'Change password'),
+  );
+  return h('section.panel',
+    h('div.panel-head', h('h2', 'Account'), h('div.spacer'), h('button.btn', { onclick: signOut }, 'Sign out')),
+    h('p.muted', me ? `Signed in as ${me.username}${me.admin ? ' (administrator)' : ''}` : 'Signed in with a service key'),
+    me ? form : null,
+  );
+}
+
+async function usersPanel() {
+  const users = await api('/users');
+  const form = h('form.inline-form', {
+    onsubmit: async (e) => {
+      e.preventDefault();
+      const v = Object.fromEntries(new FormData(form));
+      try {
+        await api('/users', { method: 'POST', body: { username: v.username, password: v.password, admin: v.admin === 'on' } });
+        toast(`Added ${v.username}`);
+        rerender();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    },
+  },
+    h('input', { name: 'username', placeholder: 'Username', autocomplete: 'off', required: true }),
+    h('input', { name: 'password', type: 'password', placeholder: 'Password (8+ characters)', autocomplete: 'new-password', minlength: 8, required: true }),
+    h('label.check', h('input', { name: 'admin', type: 'checkbox' }), ' Administrator'),
+    h('button.btn', { type: 'submit' }, 'Add user'),
+  );
+  return h('section.panel',
+    h('div.panel-head', h('h2', 'Users')),
+    h('ul.plain.user-list', users.map((u) => h('li',
+      h('span', u.username), u.admin ? h('span.tag', 'admin') : null, h('div.spacer'),
+      u.id === me?.id ? h('span.muted.small', 'you') : h('button.btn.small.ghost', {
+        onclick: async () => {
+          if (!confirm(`Remove ${u.username}? Their sign-ins stop working immediately.`)) return;
+          await api(`/users/${u.id}`, { method: 'DELETE' });
+          rerender();
+        },
+      }, 'Remove'),
+    ))),
+    form,
+  );
+}
+
+function tmdbPanel(connected) {
+  const form = h('form.inline-form', {
+    onsubmit: async (e) => {
+      e.preventDefault();
+      const key = new FormData(form).get('api_key');
+      try {
+        await api('/settings/tmdb', { method: 'PUT', body: { api_key: key } });
+        toast('TMDB key saved. Rescanning…');
+        rerender();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    },
+  },
+    h('input', { name: 'api_key', type: 'password', placeholder: connected ? 'Replace the TMDB key' : 'TMDB API key or read access token', autocomplete: 'off', required: true }),
+    h('button.btn', { type: 'submit' }, connected ? 'Replace key' : 'Save key'),
+  );
+  return h('section.panel',
+    h('div.panel-head', h('h2', 'TMDB')),
+    h('p.muted', connected ? 'Connected. Movies and shows are matched automatically.' : 'Not connected: files are scanned but not identified.'),
+    form,
   );
 }
 

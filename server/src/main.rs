@@ -18,13 +18,19 @@ async fn main() -> anyhow::Result<()> {
     let db = SqlitePoolOptions::new().max_connections(8).connect_with(opts).await?;
     sqlx::migrate!().run(&db).await?;
 
-    if cfg.tmdb_key.is_none() {
-        tracing::warn!("TMDB_API_KEY is not set: files will be scanned and probed but not matched");
-    }
     tracing::info!(media = ?cfg.media_dirs, data = %cfg.data_dir.display(), "starting Ciniva");
 
     let hw = std::sync::Arc::new(ciniva::hwaccel::detect(&cfg.ffmpeg, &cfg.data_dir, &cfg.hwaccel).await?);
     let ctx = library::Ctx::new(db, cfg.clone(), hw);
+    if let Some(key) = ciniva::auth::setting(&ctx.db, "tmdb_api_key").await {
+        ctx.set_tmdb_key(Some(key)).await;
+    }
+    if ctx.tmdb().await.is_none() {
+        tracing::warn!("no TMDB key yet: files are scanned and probed but not matched until one is set in setup");
+    }
+    if ciniva::auth::user_count(&ctx.db).await? == 0 {
+        tracing::warn!("no accounts yet: open the web UI to create the administrator");
+    }
     let scanner = ctx.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(scanner.cfg.scan_interval_mins.max(1) * 60));

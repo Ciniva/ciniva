@@ -14,9 +14,9 @@ use std::{collections::HashMap, sync::Arc};
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
-type Shared = Arc<Ctx>;
+pub type Shared = Arc<Ctx>;
 
-pub struct ApiError(StatusCode, String);
+pub struct ApiError(pub StatusCode, pub String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -37,7 +37,7 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
 
 type ApiResult<T> = Result<Json<T>, ApiError>;
 
-fn not_found() -> ApiError {
+pub fn not_found() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "not found".into())
 }
 
@@ -70,7 +70,9 @@ pub fn router(ctx: Shared) -> Router {
         .route("/files/{id}/trickplay/{sheet}", get(trickplay_sheet))
         .route("/files/{id}/subtitles/{track}", get(subtitle))
         .route("/files/{id}/credits", put(set_credits))
-        .layer(middleware::from_fn_with_state(ctx.clone(), auth));
+        .merge(crate::account::private_routes())
+        .layer(middleware::from_fn_with_state(ctx.clone(), auth))
+        .merge(crate::account::public_routes());
 
     let mut app = Router::new().nest("/api", api).with_state(ctx.clone());
     if let Some(web) = ctx.cfg.web_dir.clone() {
@@ -84,20 +86,40 @@ pub fn router(ctx: Shared) -> Router {
         .layer(tower_http::trace::TraceLayer::new_for_http())
 }
 
-async fn auth(State(ctx): State<Shared>, req: Request, next: Next) -> Response {
-    let Some(expected) = ctx.cfg.token.as_deref() else { return next.run(req).await };
-    let header = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    let query = req.uri().query().and_then(|q| {
-        q.split('&').find_map(|kv| kv.strip_prefix("token="))
-    });
-    if header == Some(expected) || query == Some(expected) {
-        next.run(req).await
+/// Session token from the cookie, an `Authorization: Bearer` header, or `?token=` (for players that can only
+/// fetch URLs).
+pub fn request_token(req: &Request) -> Option<String> {
+    let headers = req.headers();
+    if let Some(t) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")) {
+        return Some(t.trim().to_string());
+    }
+    if let Some(t) = req.uri().query().and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token="))) {
+        return Some(t.to_string());
+    }
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .find_map(|c| c.trim().strip_prefix(&format!("{}=", crate::auth::COOKIE)).map(str::to_string))
+}
+
+async fn auth(State(ctx): State<Shared>, mut req: Request, next: Next) -> Response {
+    let Some(token) = request_token(&req) else {
+        return ApiError(StatusCode::UNAUTHORIZED, "sign in required".into()).into_response();
+    };
+    let service = [ctx.cfg.plugin_secret.as_deref(), ctx.cfg.token.as_deref()].into_iter().flatten().any(|s| s == token);
+    let identity = if service {
+        Some(crate::auth::Identity::Service)
     } else {
-        ApiError(StatusCode::UNAUTHORIZED, "missing or wrong token".into()).into_response()
+        crate::auth::session_user(&ctx.db, &token).await.map(crate::auth::Identity::User)
+    };
+    match identity {
+        Some(id) => {
+            req.extensions_mut().insert(id);
+            next.run(req).await
+        }
+        None => ApiError(StatusCode::UNAUTHORIZED, "session expired or invalid".into()).into_response(),
     }
 }
 
@@ -127,7 +149,7 @@ async fn status(State(ctx): State<Shared>) -> ApiResult<Status> {
     )
     .fetch_one(&ctx.db)
     .await?;
-    Ok(Json(Status { version: env!("CARGO_PKG_VERSION"), tmdb: ctx.tmdb.is_some(), scan: ctx.status.read().await.clone(), counts }))
+    Ok(Json(Status { version: env!("CARGO_PKG_VERSION"), tmdb: ctx.tmdb().await.is_some(), scan: ctx.status.read().await.clone(), counts }))
 }
 
 async fn start_scan(State(ctx): State<Shared>) -> StatusCode {
@@ -458,7 +480,7 @@ struct TmdbSearchQuery {
 }
 
 async fn tmdb_search(State(ctx): State<Shared>, Query(q): Query<TmdbSearchQuery>) -> ApiResult<serde_json::Value> {
-    let tmdb = ctx.tmdb.as_ref().ok_or_else(|| ApiError(StatusCode::SERVICE_UNAVAILABLE, "TMDB_API_KEY not set".into()))?;
+    let tmdb = ctx.tmdb().await.ok_or_else(|| ApiError(StatusCode::SERVICE_UNAVAILABLE, "TMDB is not configured".into()))?;
     let value = if q.kind == "movie" {
         serde_json::to_value(tmdb.search_movie(&q.q, q.year).await?.into_iter().take(10).map(|s| s.hit).map(|h| {
             serde_json::json!({ "id": h.id, "title": h.title, "original_title": h.original_title, "year": crate::tmdb::year_of(&h.release_date), "poster_path": h.poster_path, "overview": h.overview })
@@ -484,8 +506,8 @@ struct MatchBody {
 }
 
 async fn match_file(State(ctx): State<Shared>, Path(id): Path<i64>, Json(b): Json<MatchBody>) -> ApiResult<serde_json::Value> {
-    if ctx.tmdb.is_none() {
-        return Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "TMDB_API_KEY not set".into()));
+    if ctx.tmdb().await.is_none() {
+        return Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "TMDB is not configured".into()));
     }
     if b.kind != "movie" && (b.season.is_none() || b.episode.is_none()) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "season and episode are required for shows".into()));

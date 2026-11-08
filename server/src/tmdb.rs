@@ -306,6 +306,11 @@ impl Tmdb {
         Ok(scored)
     }
 
+    /// Cheap authenticated call, used to check a key before saving it.
+    pub async fn verify(&self) -> Result<()> {
+        self.get::<serde_json::Value>("/configuration", &[]).await.map(|_| ())
+    }
+
     pub async fn movie(&self, id: i64) -> Result<MovieDetails> {
         self.get(&format!("/movie/{id}"), &[("append_to_response", "credits".into())]).await
     }
