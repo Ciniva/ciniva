@@ -79,6 +79,9 @@ tone    = "info" | "success" | "warning" | "error"
 
 - `POST /api/scan` with optional `{ "paths": ["/media/Downloads/Show.S01E01.mkv"] }`: rescan only those paths (files or folders).
 - `POST /api/notifications` with `{ "title", "body"?, "tone"? }`: shown to signed-in clients.
+- `POST /api/downloads/report` with `{ "plugin", "items": [{ "id", "title", "path", "size", "ranges": [[start, end], …], "progress" }] }`:
+  files that can be watched while downloading. `path` is the partial file inside a media folder, `ranges` are the
+  byte ranges already on disk. Report every few seconds; an item disappears 60 s after its last report.
 - All library endpoints (`/api/shows/{id}`, `/api/shows/{id}/seasons/{n}`, `/api/search`, …).
 
 ## Clients

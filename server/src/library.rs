@@ -29,6 +29,9 @@ pub struct Ctx {
     trickplay_lock: Mutex<()>,
     credits_lock: Mutex<()>,
     pub setup_lock: Mutex<()>,
+    pub downloads: crate::downloads::Store,
+    /// Lets the server read its own endpoints (ffmpeg pulling a download stream); never leaves the process.
+    pub internal_token: String,
     pub events: tokio::sync::broadcast::Sender<(String, serde_json::Value)>,
     pub plugins: RwLock<HashMap<String, crate::plugins::Live>>,
     pub status: RwLock<ScanStatus>,
@@ -82,6 +85,8 @@ impl Ctx {
             trickplay_lock: Mutex::new(()),
             credits_lock: Mutex::new(()),
             setup_lock: Mutex::new(()),
+            downloads: Default::default(),
+            internal_token: crate::auth::random_token(),
             events: tokio::sync::broadcast::channel(64).0,
             plugins: Default::default(),
             status: Default::default(),

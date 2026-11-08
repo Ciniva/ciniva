@@ -381,3 +381,6 @@ button.ep-item:hover { background: rgba(255,255,255,.07); }
 .tag.warning { border-color: var(--accent); color: var(--accent); }
 .tag.info { border-color: #6aa7ff; color: #9cc4ff; }
 .plugin-field.check { display: flex; align-items: center; gap: 8px; color: var(--text); font-weight: 550; font-size: 14px; }
+.seek-downloaded { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(255,255,255,.14); }
+.download-art { aspect-ratio: 16 / 9; display: grid; place-items: center; align-content: center; gap: 6px; color: var(--accent); background: linear-gradient(135deg, var(--surface-2), var(--bg-2)); font-weight: 700; }
+.download-art .icon { width: 34px; height: 34px; }

@@ -72,6 +72,7 @@ pub fn router(ctx: Shared) -> Router {
         .route("/files/{id}/credits", put(set_credits))
         .merge(crate::account::private_routes())
         .merge(crate::plugins::routes())
+        .merge(crate::downloads::routes())
         .layer(middleware::from_fn_with_state(ctx.clone(), auth))
         .merge(crate::account::public_routes());
 
@@ -109,7 +110,7 @@ async fn auth(State(ctx): State<Shared>, mut req: Request, next: Next) -> Respon
     let Some(token) = request_token(&req) else {
         return ApiError(StatusCode::UNAUTHORIZED, "sign in required".into()).into_response();
     };
-    let service = [ctx.cfg.plugin_secret.as_deref(), ctx.cfg.token.as_deref()].into_iter().flatten().any(|s| s == token);
+    let service = [ctx.cfg.plugin_secret.as_deref(), ctx.cfg.token.as_deref(), Some(ctx.internal_token.as_str())].into_iter().flatten().any(|s| s == token);
     let identity = if service {
         Some(crate::auth::Identity::Service)
     } else {

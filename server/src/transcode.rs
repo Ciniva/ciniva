@@ -184,18 +184,26 @@ impl Transcoder {
     }
 
     pub async fn start(&self, file_id: i64, input: PathBuf, media: MediaInfo, request: Request) -> Result<Arc<Session>> {
+        self.start_with(file_id, input, media, request, KeyframeSource::Library).await
+    }
+
+    pub async fn start_with(&self, file_id: i64, input: PathBuf, media: MediaInfo, request: Request, source: KeyframeSource) -> Result<Arc<Session>> {
         let Some(duration) = media.duration.filter(|d| *d > 0.0) else { bail!("unknown duration; probe the file first") };
-        let remux = if remuxable(&media, &request) {
-            match self.keyframes.quick(file_id, &input, duration).await {
-                Some(kf) => Some(segment_bounds(&kf, duration)).filter(|b| b.len() > 1 || duration <= SEGMENT_SECS * 4.0),
-                None => {
-                    self.keyframes.spawn(file_id, input.clone(), duration);
-                    None
-                }
-            }
-        } else {
+        let keyframes = if !remuxable(&media, &request) {
             None
+        } else {
+            match source {
+                KeyframeSource::Known(k) => k,
+                KeyframeSource::Library => match self.keyframes.quick(file_id, &input, duration).await {
+                    Some(kf) => Some(kf),
+                    None => {
+                        self.keyframes.spawn(file_id, input.clone(), duration);
+                        None
+                    }
+                },
+            }
         };
+        let remux = keyframes.map(|kf| segment_bounds(&kf, duration)).filter(|b| b.len() > 1 || duration <= SEGMENT_SECS * 4.0);
         if let Some(bounds) = remux {
             let source = media.video.as_ref().map(|v| v.codec.clone()).unwrap_or_default();
             let plan = Plan {
@@ -453,6 +461,13 @@ impl Keyframes {
             me.busy.lock().unwrap().remove(&file_id);
         });
     }
+}
+
+/// Where a session's keyframe times come from: the library's cache/index, or supplied by the caller (downloads,
+/// which read the index of the partial file; `None` means transcode instead of remux).
+pub enum KeyframeSource {
+    Library,
+    Known(Option<Vec<f64>>),
 }
 
 fn rand_id() -> u64 {

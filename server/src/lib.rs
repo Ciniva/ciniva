@@ -3,6 +3,7 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod credits;
+pub mod downloads;
 pub mod hwaccel;
 pub mod index;
 pub mod library;

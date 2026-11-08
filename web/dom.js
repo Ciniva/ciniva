@@ -54,6 +54,7 @@ export function icon(name) {
     list: 'M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01',
     refresh: 'M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7',
     credits: 'M4 5h16v14H4zM8 9h8M8 12h8M8 15h5',
+    download: 'M12 4v11M7 10l5 5 5-5M5 20h14',
   };
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', '0 0 24 24');
