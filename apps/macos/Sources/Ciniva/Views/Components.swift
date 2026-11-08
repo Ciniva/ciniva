@@ -179,7 +179,8 @@ struct ContinueCard: View {
                     }
                     .overlay(alignment: .bottom) { ProgressBar(progress: item.progress) }
                 Text(item.title).font(.callout.weight(.medium)).lineLimit(1)
-                Text(item.subtitle ?? "\(Fmt.clock(Double(item.durationMs - item.positionMs) / 1000)) left")
+                Text([item.nextUp == true ? "Up next" : nil, item.subtitle].compactMap { $0 }.joined(separator: " · ").nilIfEmpty
+                     ?? "\(Fmt.clock(Double(item.durationMs - item.positionMs) / 1000)) left")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             .frame(width: width)
@@ -312,4 +313,8 @@ func toneColor(_ tone: Tone?) -> Color? {
     case .primary: return accent
     default: return nil
     }
+}
+
+extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

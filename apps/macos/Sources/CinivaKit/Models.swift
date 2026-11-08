@@ -69,6 +69,7 @@ public struct ContinueItem: Decodable, Identifiable, Hashable, Sendable {
     public let subtitle: String?
     public let imagePath: String?
     public let posterPath: String?
+    public let nextUp: Bool?
 
     public var progress: Double { durationMs > 0 ? Double(positionMs) / Double(durationMs) : 0 }
 }

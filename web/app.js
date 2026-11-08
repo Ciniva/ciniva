@@ -275,7 +275,7 @@ function continueCard(c) {
   return h('button.wide-card', { onclick: play, title: c.title },
     h('div.wide-art', poster(c.image_path, c.title, 'w780'), h('span.play-overlay', icon('play')), progressBar(c.position_ms / c.duration_ms)),
     h('div.card-title', c.title),
-    h('div.card-sub', c.subtitle || `${clock((c.duration_ms - c.position_ms) / 1000)} left`),
+    h('div.card-sub', c.next_up ? `Up next · ${c.subtitle}` : c.subtitle || `${clock((c.duration_ms - c.position_ms) / 1000)} left`),
   );
 }
 

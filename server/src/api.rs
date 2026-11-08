@@ -405,7 +405,42 @@ struct ContinueItem {
     subtitle: Option<String>,
     image_path: Option<String>,
     poster_path: Option<String>,
+    /// The episode after the last one finished, rather than something partly watched.
+    #[sqlx(default)]
+    next_up: bool,
 }
+
+/// For each show, the first unwatched episode in the library after the most recently finished one.
+const UP_NEXT: &str = "WITH last AS (
+        SELECT e.show_id, e.season_number sn, e.episode_number en, p.updated_at,
+            ROW_NUMBER() OVER (PARTITION BY e.show_id ORDER BY p.updated_at DESC, e.season_number DESC, e.episode_number DESC) rn
+        FROM progress p
+        JOIN file_episodes fe ON fe.file_id = p.file_id
+        JOIN episodes e ON e.id = fe.episode_id
+        WHERE p.watched = 1 AND e.season_number > 0
+    )
+    SELECT MIN(f.id) file_id, 0 position_ms, CAST(COALESCE(MIN(f.duration), 0) * 1000 AS INTEGER) duration_ms, last.updated_at,
+        NULL movie_id, s.id show_id, s.title,
+        'S' || e.season_number || ' · E' || e.episode_number || COALESCE(' — ' || e.title, '') subtitle,
+        COALESCE(e.still_path, s.backdrop_path) image_path, s.poster_path, 1 next_up
+    FROM last
+    JOIN shows s ON s.id = last.show_id
+    JOIN episodes e ON e.id = (
+        SELECT e2.id FROM episodes e2
+        JOIN file_episodes fe2 ON fe2.episode_id = e2.id
+        LEFT JOIN progress p2 ON p2.file_id = fe2.file_id
+        WHERE e2.show_id = last.show_id AND e2.season_number > 0
+          AND (e2.season_number > last.sn OR (e2.season_number = last.sn AND e2.episode_number > last.en))
+        GROUP BY e2.id
+        HAVING MAX(COALESCE(p2.watched, 0)) = 0
+        ORDER BY e2.season_number, e2.episode_number
+        LIMIT 1)
+    JOIN file_episodes fe ON fe.episode_id = e.id
+    JOIN files f ON f.id = fe.file_id
+    WHERE last.rn = 1
+    GROUP BY s.id
+    ORDER BY last.updated_at DESC
+    LIMIT 20";
 
 #[derive(Serialize)]
 struct Home {
@@ -415,7 +450,7 @@ struct Home {
 }
 
 async fn home(State(ctx): State<Shared>) -> ApiResult<Home> {
-    let continue_watching = sqlx::query_as(
+    let partial: Vec<ContinueItem> = sqlx::query_as(
         "SELECT p.file_id, p.position_ms, p.duration_ms, p.updated_at,
             m.id movie_id, s.id show_id,
             COALESCE(m.title, s.title) title,
@@ -434,6 +469,12 @@ async fn home(State(ctx): State<Shared>) -> ApiResult<Home> {
     )
     .fetch_all(&ctx.db)
     .await?;
+    let up_next: Vec<ContinueItem> = sqlx::query_as(UP_NEXT).fetch_all(&ctx.db).await?;
+    // One entry per show: an episode in progress wins over the next one.
+    let busy: std::collections::HashSet<i64> = partial.iter().filter_map(|c| c.show_id).collect();
+    let mut continue_watching: Vec<ContinueItem> = partial.into_iter().chain(up_next.into_iter().filter(|c| c.show_id.is_none_or(|s| !busy.contains(&s)))).collect();
+    continue_watching.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    continue_watching.truncate(20);
     let recent_movies = sqlx::query_as(&format!("{MOVIE_CARD} ORDER BY m.added_at DESC LIMIT 20")).fetch_all(&ctx.db).await?;
     let recent_shows = sqlx::query_as(&format!("{SHOW_CARD} GROUP BY s.id ORDER BY last_added DESC LIMIT 20")).fetch_all(&ctx.db).await?;
     Ok(Json(Home { continue_watching, recent_movies, recent_shows }))
