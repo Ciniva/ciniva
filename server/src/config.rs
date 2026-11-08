@@ -17,8 +17,11 @@ pub struct Config {
     pub trickplay: bool,
 }
 
+/// `NAME`, or the contents of the file named by `NAME_FILE` (Docker/Compose secrets).
 fn var(name: &str) -> Option<String> {
-    env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    let direct = env::var(name).ok();
+    let from_file = || env::var(format!("{name}_FILE")).ok().and_then(|path| std::fs::read_to_string(path).ok());
+    direct.or_else(from_file).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
 impl Config {

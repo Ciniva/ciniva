@@ -19,8 +19,10 @@ use axum::{
 use std::sync::Arc;
 use tower::Layer;
 
+/// `NAME`, or the contents of the file named by `NAME_FILE` (Docker/Compose secrets).
 fn env(name: &str) -> Option<String> {
-    std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    let from_file = || std::env::var(format!("{name}_FILE")).ok().and_then(|path| std::fs::read_to_string(path).ok());
+    std::env::var(name).ok().or_else(from_file).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
 /// Jellyfin clients disagree on path casing and some still prefix `/emby`; route on one canonical form.

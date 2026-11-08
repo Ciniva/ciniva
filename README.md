@@ -30,6 +30,8 @@ username and password.
 | `CINIVA_PORT` | `8484` | |
 | `CINIVA_PLUGIN_SECRET` | – | Service key plugins use (`Authorization: Bearer`); needed for plugins |
 | `CINIVA_TOKEN` | – | Legacy service key with the same rights; prefer `CINIVA_PLUGIN_SECRET` |
+
+Any of these can also be given as a file (Docker/Compose secrets): set `NAME_FILE=/run/secrets/…` instead of `NAME`. The plugins accept `*_FILE` the same way.
 | `CINIVA_LANGUAGE` | `en-US` | TMDB metadata language |
 | `CINIVA_SCAN_INTERVAL` | `15` | Minutes between rescans |
 | `CINIVA_WEB` | `/web` in Docker | Folder with the web UI (`web/`); unset serves the API only |

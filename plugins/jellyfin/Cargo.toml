@@ -1,6 +1,6 @@
 [package]
 name = "ciniva-jellyfin"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "Jellyfin-compatible API bridge for Ciniva, so Jellyfin apps can browse and play a Ciniva library."

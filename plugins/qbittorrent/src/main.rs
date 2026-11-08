@@ -27,8 +27,10 @@ pub struct Config {
     pub path_map: Vec<(String, String)>,
 }
 
+/// `NAME`, or the contents of the file named by `NAME_FILE` (Docker/Compose secrets).
 fn env(name: &str, default: &str) -> String {
-    std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string())
+    let from_file = || std::env::var(format!("{name}_FILE")).ok().and_then(|path| std::fs::read_to_string(path).ok());
+    std::env::var(name).ok().or_else(from_file).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string())
 }
 
 impl Config {
