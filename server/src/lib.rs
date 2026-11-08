@@ -7,6 +7,7 @@ pub mod hwaccel;
 pub mod index;
 pub mod library;
 pub mod parser;
+pub mod plugins;
 pub mod probe;
 pub mod tmdb;
 pub mod transcode;

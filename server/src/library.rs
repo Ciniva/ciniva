@@ -29,6 +29,8 @@ pub struct Ctx {
     trickplay_lock: Mutex<()>,
     credits_lock: Mutex<()>,
     pub setup_lock: Mutex<()>,
+    pub events: tokio::sync::broadcast::Sender<(String, serde_json::Value)>,
+    pub plugins: RwLock<HashMap<String, crate::plugins::Live>>,
     pub status: RwLock<ScanStatus>,
 }
 
@@ -80,8 +82,15 @@ impl Ctx {
             trickplay_lock: Mutex::new(()),
             credits_lock: Mutex::new(()),
             setup_lock: Mutex::new(()),
+            events: tokio::sync::broadcast::channel(64).0,
+            plugins: Default::default(),
             status: Default::default(),
         })
+    }
+
+    /// Send an event to every connected client (`/api/events`); nobody listening is fine.
+    pub fn emit(&self, kind: &str, data: serde_json::Value) {
+        let _ = self.events.send((kind.to_string(), data));
     }
 
     pub async fn tmdb(&self) -> Option<Arc<Tmdb>> {
@@ -119,8 +128,29 @@ fn walk(dirs: &[PathBuf]) -> Vec<(PathBuf, i64, i64)> {
 
 pub async fn scan(ctx: &Arc<Ctx>) -> Result<Option<ScanReport>> {
     let Ok(_guard) = ctx.scan_lock.try_lock() else { return Ok(None) };
+    finish_scan(ctx, None).await
+}
+
+/// Rescan only the folders holding `paths` (whole folders, so sibling-based episode numbering stays the same as in a
+/// full scan). Waits for a running scan instead of skipping.
+pub async fn scan_paths(ctx: &Arc<Ctx>, paths: Vec<PathBuf>) -> Result<Option<ScanReport>> {
+    let mut dirs: Vec<PathBuf> = paths
+        .into_iter()
+        .filter(|p| ctx.cfg.media_dirs.iter().any(|m| p.starts_with(m)))
+        .map(|p| if p.is_dir() { p } else { p.parent().map(|d| d.to_path_buf()).unwrap_or(p) })
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    if dirs.is_empty() {
+        anyhow::bail!("no path inside the media folders");
+    }
+    let _guard = ctx.scan_lock.lock().await;
+    finish_scan(ctx, Some(dirs)).await
+}
+
+async fn finish_scan(ctx: &Arc<Ctx>, scope: Option<Vec<PathBuf>>) -> Result<Option<ScanReport>> {
     ctx.status.write().await.running = true;
-    let result = scan_inner(ctx).await;
+    let result = scan_inner(ctx, scope).await;
     let mut s = ctx.status.write().await;
     s.running = false;
     s.phase = match &result {
@@ -132,13 +162,16 @@ pub async fn scan(ctx: &Arc<Ctx>) -> Result<Option<ScanReport>> {
         s.last_report = Some(r.clone());
     }
     drop(s);
-    if ctx.cfg.trickplay {
-        let ctx = ctx.clone();
-        tokio::spawn(async move {
-            credits_pass(&ctx).await;
-            trickplay_pass(&ctx).await;
-        });
+    if let Ok(r) = &result {
+        ctx.emit("library", serde_json::json!({ "kind": "scan.finished", "added": r.added, "removed": r.removed, "matched": r.matched }));
     }
+    let bg = ctx.clone();
+    tokio::spawn(async move {
+        credits_pass(&bg).await;
+        if bg.cfg.trickplay {
+            trickplay_pass(&bg).await;
+        }
+    });
     result.map(Some)
 }
 
@@ -284,10 +317,10 @@ pub async fn trickplay_pass(ctx: &Arc<Ctx>) {
     }
 }
 
-async fn scan_inner(ctx: &Arc<Ctx>) -> Result<ScanReport> {
+async fn scan_inner(ctx: &Arc<Ctx>, scope: Option<Vec<PathBuf>>) -> Result<ScanReport> {
     let mut report = ScanReport::default();
     ctx.set_phase("walking", 0, 0).await;
-    let dirs = ctx.cfg.media_dirs.clone();
+    let dirs = scope.clone().unwrap_or_else(|| ctx.cfg.media_dirs.clone());
     let found = tokio::task::spawn_blocking(move || walk(&dirs)).await?;
     report.files = found.len();
 
@@ -300,8 +333,9 @@ async fn scan_inner(ctx: &Arc<Ctx>) -> Result<ScanReport> {
             .collect();
 
     let present: HashSet<String> = found.iter().map(|(p, ..)| p.to_string_lossy().into_owned()).collect();
+    let in_scope = |p: &str| scope.as_ref().is_none_or(|dirs| dirs.iter().any(|d| std::path::Path::new(p).starts_with(d)));
     for (path, (id, ..)) in &existing {
-        if !present.contains(path) {
+        if !present.contains(path) && in_scope(path) {
             sqlx::query("DELETE FROM files WHERE id = ?").bind(id).execute(&ctx.db).await?;
             report.removed += 1;
         }

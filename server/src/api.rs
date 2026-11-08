@@ -71,6 +71,7 @@ pub fn router(ctx: Shared) -> Router {
         .route("/files/{id}/subtitles/{track}", get(subtitle))
         .route("/files/{id}/credits", put(set_credits))
         .merge(crate::account::private_routes())
+        .merge(crate::plugins::routes())
         .layer(middleware::from_fn_with_state(ctx.clone(), auth))
         .merge(crate::account::public_routes());
 
@@ -152,9 +153,17 @@ async fn status(State(ctx): State<Shared>) -> ApiResult<Status> {
     Ok(Json(Status { version: env!("CARGO_PKG_VERSION"), tmdb: ctx.tmdb().await.is_some(), scan: ctx.status.read().await.clone(), counts }))
 }
 
-async fn start_scan(State(ctx): State<Shared>) -> StatusCode {
+#[derive(Deserialize, Default)]
+struct ScanBody {
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+async fn start_scan(State(ctx): State<Shared>, body: Option<Json<ScanBody>>) -> StatusCode {
+    let paths: Vec<std::path::PathBuf> = body.map(|b| b.0.paths).unwrap_or_default().into_iter().map(Into::into).collect();
     tokio::spawn(async move {
-        if let Err(e) = library::scan(&ctx).await {
+        let result = if paths.is_empty() { library::scan(&ctx).await } else { library::scan_paths(&ctx, paths).await };
+        if let Err(e) = result {
             tracing::error!("scan failed: {e:#}");
         }
     });

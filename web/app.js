@@ -2,8 +2,10 @@ import { api, img, pref, setPref, AuthError } from './api.js';
 import { h, append, clear, icon, duration, bytes, fileName, progressBar, poster, movieCard, showCard, row, techBadges, toast, clock, modal } from './dom.js';
 import { openPlayer, seekSteps, SEEK_DEFAULTS } from './player.js';
 import { fixView, matchDialog } from './fix.js';
+import { plugins, actionsFor, runAction, pluginView, settingsPanels, listenForEvents } from './plugins.js';
 
 const app = document.getElementById('app');
+const navPlugins = h('span.nav-plugins');
 const main = h('main');
 const search = h('input.search', { type: 'search', placeholder: 'Search', 'aria-label': 'Search library' });
 const fixBadge = h('span.nav-badge');
@@ -13,6 +15,7 @@ const nav = h('header.nav',
     h('a', { href: '#/', 'data-route': 'home' }, 'Home'),
     h('a', { href: '#/movies', 'data-route': 'movies' }, 'Movies'),
     h('a', { href: '#/shows', 'data-route': 'shows' }, 'Shows'),
+    navPlugins,
   ),
   h('div.nav-right',
     h('label.search-box', icon('search'), search),
@@ -40,6 +43,7 @@ const routes = [
   [/^\/search$/, 'search', searchView],
   [/^\/fix$/, 'fix', (el) => fixView(el, refreshStatus)],
   [/^\/settings$/, 'settings', settingsView],
+  [/^\/plugin\/([\w-]+)\/([\w-]+)$/, 'plugin', (el, m, q) => pluginView(el, m[1], m[2], q)],
 ];
 
 let seq = 0;
@@ -50,7 +54,8 @@ async function route() {
   const found = routes.find(([re]) => re.test(path)) || routes[0];
   const match = path.match(found[0]) || [];
   const mine = ++seq;
-  for (const a of nav.querySelectorAll('[data-route]')) a.classList.toggle('active', a.dataset.route === found[1]);
+  const routeKey = found[1] === 'plugin' ? `plugin-${match[1]}-${match[2]}` : found[1];
+  for (const a of nav.querySelectorAll('[data-route]')) a.classList.toggle('active', a.dataset.route === routeKey);
   if (found[1] !== 'search') search.value = '';
   const view = h('div.view');
   main.classList.add('busy');
@@ -75,6 +80,17 @@ async function rerender() {
 }
 
 let me = null;
+
+async function refreshPluginNav() {
+  const list = await plugins(true);
+  navPlugins.replaceChildren(...list.filter((p) => p.online).flatMap((p) => (p.pages || []).filter((pg) => pg.nav).map((pg) =>
+    h('a', { href: `#/plugin/${p.id}/${pg.id}`, 'data-route': `plugin-${p.id}-${pg.id}` }, pg.title))));
+}
+
+function pluginButtons(list, kind, context) {
+  return actionsFor(list, kind).map(({ plugin, action }) =>
+    h('button.btn', { title: plugin.name, onclick: () => runAction(plugin, action, context) }, icon(action.icon || 'search'), ` ${action.title}`));
+}
 
 function authCard(...content) {
   return h('div.login', h('div.login-card', h('img.login-logo', { src: 'icon.svg', alt: '' }), ...content));
@@ -209,6 +225,8 @@ async function start() {
   }
   if (me?.admin && !setup.tmdb_configured && pref('tmdbSkipped', '') !== '1') return setupTmdb(false);
   app.replaceChildren(nav, main);
+  refreshPluginNav();
+  listenForEvents(() => refreshStatus());
   refreshStatus();
   route();
 }
@@ -376,7 +394,7 @@ async function setWatched(files, watched) {
 }
 
 async function movieView(el, id) {
-  const m = await api(`/movies/${id}`);
+  const [m, pl] = await Promise.all([api(`/movies/${id}`), plugins()]);
   let file = m.files[0];
   const actions = h('div.actions');
   const details = h('div');
@@ -386,6 +404,7 @@ async function movieView(el, id) {
       ...(file ? playButtons(file, (startAt) => openPlayer({ fileId: file.id, title: m.title, subtitle: m.year ? String(m.year) : '', startAt })) : []),
       h('button.btn', { onclick: async () => { await setWatched(m.files, !watched); rerender(); } }, icon('check'), watched ? ' Mark unwatched' : ' Mark watched'),
       file ? h('button.btn.ghost', { onclick: () => matchDialog(m.files, { kind: 'movie', query: m.title, year: m.year }, rerender) }, icon('wrench'), ' Fix match') : null,
+      ...pluginButtons(pl, 'movie', { kind: 'movie', id: m.id, tmdb_id: m.tmdb_id, title: m.title, year: m.year }),
     );
     append(clear(details), resumeLine(file), file ? fileDetails(file) : h('p.muted', 'No playable file.'));
   };
@@ -413,7 +432,7 @@ async function movieView(el, id) {
 }
 
 async function showView(el, id, params) {
-  const s = await api(`/shows/${id}`);
+  const [s, pl] = await Promise.all([api(`/shows/${id}`), plugins()]);
   if (!s.seasons.length) {
     append(el, hero(s.backdrop_path, h('h1', s.title)), h('div.empty', h('p', 'No episodes in the library.')));
     return;
@@ -462,6 +481,10 @@ async function showView(el, id, params) {
           upNext ? h('button.btn.primary', { onclick: () => play(upNext) }, icon('play'), ` ${upNext.files[0].position_ms ? 'Resume' : 'Play'} S${upNext.season_number} · E${upNext.episode_number}`) : null,
           h('button.btn', { onclick: async () => { await setWatched(episodes.flatMap((e) => e.files), current.watched < current.available); rerender(); } },
             icon('check'), current.watched < current.available ? ` Mark ${label(current)} watched` : ` Mark ${label(current)} unwatched`),
+          ...pluginButtons(pl, 'show', { kind: 'show', id: s.id, tmdb_id: s.tmdb_id, title: s.title, year: s.year,
+            seasons: s.seasons.map((x) => ({ season: x.season_number, available: x.available, episodes: x.episode_count })) }),
+          ...pluginButtons(pl, 'season', { kind: 'season', id: s.id, tmdb_id: s.tmdb_id, title: s.title, year: s.year, season: current.season_number,
+            missing: episodes.filter((e) => !e.files.length).map((e) => ({ season: e.season_number, episode: e.episode_number, title: e.title })) }),
         ),
         s.overview ? h('p.overview', s.overview) : null,
       ),
@@ -539,6 +562,7 @@ async function settingsView(el) {
     accountPanel(),
     me?.admin ? await usersPanel() : null,
     me?.admin ? tmdbPanel(status.tmdb) : null,
+    ...(me?.admin ? await settingsPanels() : []),
   );
 }
 
