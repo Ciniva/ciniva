@@ -4,8 +4,8 @@ ARG PROWLARR_SHA256=d65cb9fb442a8a3ded055d7027db9a08f519acb7908c7afe72175aa7c337
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
  && curl -fsSL -o /prowlarr.tar.gz "$PROWLARR_URL" \
  && echo "$PROWLARR_SHA256  /prowlarr.tar.gz" | sha256sum -c - \
- && mkdir /app && tar xzf /prowlarr.tar.gz -C /app --strip-components=1 \
- && rm -rf /app/Prowlarr.Update \
+ && mkdir -p /app/bin && tar xzf /prowlarr.tar.gz -C /app/bin --strip-components=1 \
+ && rm -rf /app/bin/Prowlarr.Update \
  && printf 'PackageAuthor=Ciniva\nUpdateMethod=docker\nUpdateMethodMessage=Update by rebuilding the ciniva-prowlarr image\nBranch=master\n' > /app/package_info
 
 FROM debian:trixie-slim
@@ -20,4 +20,4 @@ ENV HOME=/config
 USER prowlarr:prowlarr
 VOLUME ["/config"]
 EXPOSE 9696
-ENTRYPOINT ["/app/Prowlarr", "-nobrowser", "-data=/config"]
+ENTRYPOINT ["/app/bin/Prowlarr", "-nobrowser", "-data=/config"]
