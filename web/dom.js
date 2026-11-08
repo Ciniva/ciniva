@@ -50,6 +50,8 @@ export function icon(name) {
     wrench: 'M14.7 6.3a4 4 0 0 0-5.4 5.1L4 16.7 7.3 20l5.3-5.3a4 4 0 0 0 5.1-5.4l-2.5 2.5-2.4-.6-.6-2.4z',
     x: 'M6 6l12 12M18 6L6 18',
     next: 'M6 5v14l9-7zM17 5h2v14h-2z',
+    prev: 'M18 5v14l-9-7zM7 5H5v14h2z',
+    list: 'M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01',
     refresh: 'M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7',
     credits: 'M4 5h16v14H4zM8 9h8M8 12h8M8 15h5',
   };
@@ -59,7 +61,7 @@ export function icon(name) {
   svg.setAttribute('aria-hidden', 'true');
   const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   p.setAttribute('d', paths[name] || '');
-  if (name === 'play' || name === 'pause' || name === 'next') p.setAttribute('class', 'fill');
+  if (name === 'play' || name === 'pause' || name === 'next' || name === 'prev') p.setAttribute('class', 'fill');
   svg.append(p);
   return svg;
 }

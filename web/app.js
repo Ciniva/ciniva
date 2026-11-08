@@ -166,7 +166,7 @@ function continueCard(c) {
     fileId: c.file_id,
     title: c.title,
     subtitle: c.subtitle,
-    next: c.show_id ? () => nextEpisode(c.show_id, c.file_id) : undefined,
+    showId: c.show_id || undefined,
   });
   return h('button.wide-card', { onclick: play, title: c.title },
     h('div.wide-art', poster(c.image_path, c.title, 'w780'), h('span.play-overlay', icon('play')), progressBar(c.position_ms / c.duration_ms)),
@@ -342,7 +342,7 @@ async function showView(el, id, params) {
     title: s.title,
     subtitle: `S${e.season_number} · E${e.episode_number}${e.title ? ' — ' + e.title : ''}`,
     startAt,
-    next: () => nextEpisode(id, e.files[0].id),
+    showId: id,
   });
   const upNext = episodes.find((e) => e.files.length && !e.files[0].watched);
   const episodeRow = (e) => {
@@ -387,25 +387,6 @@ async function showView(el, id, params) {
   );
 }
 
-async function nextEpisode(showId, fileId) {
-  const s = await api(`/shows/${showId}`);
-  let found = false;
-  for (const season of s.seasons.filter((x) => x.season_number > 0)) {
-    const eps = await api(`/shows/${showId}/seasons/${season.season_number}`);
-    for (const e of eps) {
-      if (found && e.files.length) {
-        return {
-          fileId: e.files[0].id,
-          title: s.title,
-          subtitle: `S${e.season_number} · E${e.episode_number}${e.title ? ' — ' + e.title : ''}`,
-          next: () => nextEpisode(showId, e.files[0].id),
-        };
-      }
-      if (e.files.some((f) => f.id === fileId)) found = true;
-    }
-  }
-  return null;
-}
 
 async function settingsView(el) {
   const [status, hw] = await Promise.all([api('/status'), api('/hardware')]);

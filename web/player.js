@@ -1,5 +1,6 @@
 import { api, url, pref, setPref } from './api.js';
-import { h, icon, clock, audioLabel, langName, toast, modal } from './dom.js';
+import { h, icon, clock, audioLabel, langName, toast, modal, poster, progressBar } from './dom.js';
+import * as episodes from './episodes.js';
 
 const QUALITIES = [
   { id: 'auto', label: 'Original' },
@@ -122,7 +123,8 @@ function askResume(saved, duration) {
   });
 }
 
-export async function openPlayer({ fileId, title, subtitle, startAt, next, reuseHistory }) {
+export async function openPlayer({ fileId, title, subtitle, startAt, next, reuseHistory, showId }) {
+  if (showId && !next) next = () => episodes.neighbour(showId, fileId, 1);
   const file = await api(`/files/${fileId}`);
   if (!file.probe) {
     toast('This file has not been analysed yet. Try again after the scan finishes.', 'error');
@@ -156,6 +158,10 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
   const seek = h('div.seek', { role: 'slider', 'aria-label': 'Seek' }, h('div.seek-track', buffered, played), knob, trick);
   const time = h('span.time');
   const playBtn = h('button.ctl', { 'aria-label': 'Play' }, icon('play'));
+  const prevBtn = showId ? h('button.ctl', { 'aria-label': 'Previous episode', title: 'Previous episode (⇧P)', disabled: true }, icon('prev')) : null;
+  const nextBtn = showId ? h('button.ctl', { 'aria-label': 'Next episode', title: 'Next episode (⇧N)', disabled: true }, icon('next')) : null;
+  const listBtn = showId ? h('button.ctl', { 'aria-label': 'Episodes', title: 'Episodes' }, icon('list')) : null;
+  const panel = h('aside.ep-panel');
   const muteBtn = h('button.ctl', { 'aria-label': 'Mute' }, icon('volume'));
   const volume = h('input.volume', { type: 'range', min: 0, max: 1, step: 0.05, value: video.volume, 'aria-label': 'Volume' });
   const spinner = h('div.spinner');
@@ -183,12 +189,16 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
     spinner,
     message,
     upNext,
+    panel,
     h('div.player-bottom',
       seek,
       h('div.controls',
+        prevBtn,
         playBtn,
+        nextBtn,
         time,
         h('div.spacer'),
+        listBtn,
         probe.audio.length > 1 ? audioSelect : null,
         probe.subtitles.length ? subSelect : null,
         qualitySelect,
@@ -422,7 +432,7 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
   function poke() {
     root.classList.remove('idle');
     clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => { if (!video.paused && !dragging) root.classList.add('idle'); }, 3000);
+    hideTimer = setTimeout(() => { if (!video.paused && !dragging && !root.classList.contains('panel-open')) root.classList.add('idle'); }, 3000);
   }
   root.addEventListener('pointermove', poke);
 
@@ -564,7 +574,12 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
       case 'ArrowDown': video.volume = Math.max(0, video.volume - 0.05); break;
       case 'f': toggleFullscreen(); break;
       case 'm': video.muted = !video.muted; break;
-      case 'Escape': if (!document.fullscreenElement) close(); break;
+      case 'Escape':
+        if (root.classList.contains('panel-open')) closePanel();
+        else if (!document.fullscreenElement) close();
+        break;
+      case 'N': if (e.shiftKey && nextBtn && !nextBtn.disabled) nextBtn.click(); break;
+      case 'P': if (e.shiftKey && prevBtn && !prevBtn.disabled) prevBtn.click(); break;
       default: return;
     }
     e.preventDefault();
@@ -590,6 +605,67 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
     if (!fromHistory && !keepHistory) history.back();
     await Promise.race([saved, new Promise((r) => setTimeout(r, 2000))]);
     window.dispatchEvent(new CustomEvent('ciniva:player-closed'));
+  }
+
+  function switchTo(target, at) {
+    close({ keepHistory: true }).then(() => openPlayer({ ...target, startAt: at, reuseHistory: true }));
+  }
+
+  if (showId) {
+    let prevTarget = null;
+    let nextTarget = null;
+    episodes.neighbour(showId, fileId, -1).then((t) => { prevTarget = t; prevBtn.disabled = !t; if (t) prevBtn.title = `Previous: ${t.subtitle}`; }).catch(() => {});
+    episodes.neighbour(showId, fileId, 1).then((t) => { nextTarget = t; nextBtn.disabled = !t; if (t) nextBtn.title = `Next: ${t.subtitle}`; }).catch(() => {});
+    prevBtn.addEventListener('click', () => prevTarget && switchTo(prevTarget));
+    nextBtn.addEventListener('click', () => nextTarget && switchTo(nextTarget));
+    listBtn.addEventListener('click', () => (root.classList.contains('panel-open') ? closePanel() : openPanel()));
+  }
+
+  function closePanel() {
+    root.classList.remove('panel-open');
+    poke();
+  }
+
+  async function openPanel() {
+    root.classList.add('panel-open');
+    poke();
+    panel.replaceChildren(h('div.muted.ep-panel-loading', 'Loading episodes…'));
+    try {
+      const s = await episodes.show(showId);
+      const where = await episodes.locate(showId, fileId);
+      const select = h('select.ctl-select', { 'aria-label': 'Season' },
+        episodes.seasonOrder(s).map((x) => h('option', { value: x.season_number, selected: x.season_number === where?.season },
+          x.name || (x.season_number === 0 ? 'Specials' : `Season ${x.season_number}`))));
+      const list = h('div.ep-panel-list');
+      const fill = async () => {
+        list.replaceChildren(h('div.muted', 'Loading…'));
+        const eps = await api(`/shows/${showId}/seasons/${select.value}`);
+        list.replaceChildren(...eps.map((e) => {
+          const f = e.files[0];
+          const current = e.files.some((x) => x.id === fileId);
+          const frac = f && f.duration_ms ? f.position_ms / f.duration_ms : 0;
+          const row = h(f ? 'button.ep-item' : 'div.ep-item.missing', f ? { onclick: () => (current ? closePanel() : switchTo(episodes.item(s, e))) } : {},
+            h('div.ep-item-art', poster(e.still_path, '', 'w300'), progressBar(frac), f?.watched ? h('span.badge-watched', icon('check')) : null),
+            h('div.ep-item-body',
+              h('div.ep-item-title', `${e.episode_number}. ${e.title || `Episode ${e.episode_number}`}`),
+              h('div.ep-item-meta', current ? 'Playing now' : f ? [e.runtime ? `${e.runtime} min` : '', f.position_ms && !f.watched ? `${clock((f.duration_ms - f.position_ms) / 1000)} left` : ''].filter(Boolean).join(' · ') : 'Not in library'),
+            ),
+          );
+          if (current) row.classList.add('current');
+          return row;
+        }));
+        list.querySelector('.current')?.scrollIntoView({ block: 'center' });
+      };
+      select.addEventListener('change', fill);
+      panel.replaceChildren(
+        h('div.ep-panel-head', h('div.ep-panel-title', s.title), select,
+          h('button.ctl', { 'aria-label': 'Close episodes', onclick: closePanel }, icon('x'))),
+        list,
+      );
+      await fill();
+    } catch (e) {
+      panel.replaceChildren(h('div.error', `Could not load episodes: ${e.message}`));
+    }
   }
 
   document.addEventListener('keydown', onKey);
