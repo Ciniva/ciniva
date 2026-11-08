@@ -85,7 +85,8 @@ the service key, so a compromised plugin can reach Ciniva's API and nothing else
 ## Downloads stack and its security
 
 qBittorrent and Prowlarr run in their own containers built from pinned, checksum-verified releases
-(`docker/qbittorrent`, `docker/prowlarr`), unprivileged and with read-only root filesystems:
+([ciniva-plugin-qbittorrent](https://github.com/Ciniva/ciniva-plugin-qbittorrent) builds the qBittorrent image,
+[prowlarr](https://github.com/Ciniva/prowlarr) the Prowlarr one), unprivileged and with read-only root filesystems:
 
 - qBittorrent sees the library read-only, so it can keep seeding existing torrents but cannot alter or delete them.
   It can write only to `Downloads`, which Ciniva also scans. Incomplete files carry the `.!qB` extension, so Ciniva
@@ -95,12 +96,11 @@ qBittorrent and Prowlarr run in their own containers built from pinned, checksum
 
 ## Apps
 
-- macOS: `apps/macos` (`./build.sh`, then `open build/Ciniva.app`). Direct-plays every format through mpv or
+- macOS: [ciniva-macos](https://github.com/Ciniva/ciniva-macos) (download the latest release; it updates itself). Direct-plays every format through mpv or
   AVFoundation (Dolby Vision, HDR10, Atmos), with resume, credits/Up next, episode navigation and plugin pages.
 
 ## Images
 
-GitHub Actions tests the server and publishes images to the GitHub container registry on every push to `main`
-(`latest` and `sha-<short>`; `X.Y.Z` for `vX.Y.Z` tags): `ghcr.io/ciniva/ciniva`, `ghcr.io/ciniva/qbittorrent`,
-`ghcr.io/ciniva/prowlarr`. Each plugin repository publishes its own image the same way. The packages are private, so a
-server needs `docker login ghcr.io` with a token that has `read:packages` before it can pull them.
+GitHub Actions tests the server and publishes `ghcr.io/ciniva/ciniva` on every push to `main` (`latest` and
+`sha-<short>`; `X.Y.Z` for `vX.Y.Z` tags). The qBittorrent, Prowlarr and plugin images come from their own repositories
+the same way. All images are public, so `docker compose pull` needs no login.
