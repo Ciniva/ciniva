@@ -15,16 +15,21 @@ Anything still uncertain lands in *Unmatched*, where a manual match is remembere
 
 ```sh
 cd server
-TMDB_API_KEY=… CINIVA_MEDIA=/path/to/dump CINIVA_DATA=./data cargo run --release
+CINIVA_MEDIA=/path/to/dump CINIVA_DATA=./data CINIVA_WEB=../web cargo run --release
 ```
+
+Open the web UI. The first visit creates the administrator account, then asks for a TMDB API key (or read access
+token); both can be changed later in Settings, where administrators also add users. Apps sign in with the same
+username and password.
 
 | Variable | Default | |
 |---|---|---|
 | `CINIVA_MEDIA` | `/media` | Comma-separated folders to scan |
 | `CINIVA_DATA` | `./data` | Database and image cache |
-| `TMDB_API_KEY` | – | TMDB v3 key or v4 read token |
+| `TMDB_API_KEY` | – | Optional: TMDB key, if you'd rather not enter it during setup (a key saved in setup wins) |
 | `CINIVA_PORT` | `8484` | |
-| `CINIVA_TOKEN` | – | If set, required as `Authorization: Bearer` or `?token=` |
+| `CINIVA_PLUGIN_SECRET` | – | Service key plugins use (`Authorization: Bearer`); needed for plugins |
+| `CINIVA_TOKEN` | – | Legacy service key with the same rights; prefer `CINIVA_PLUGIN_SECRET` |
 | `CINIVA_LANGUAGE` | `en-US` | TMDB metadata language |
 | `CINIVA_SCAN_INTERVAL` | `15` | Minutes between rescans |
 | `CINIVA_WEB` | `/web` in Docker | Folder with the web UI (`web/`); unset serves the API only |
@@ -41,9 +46,11 @@ TMDB_API_KEY=… CINIVA_MEDIA=/path/to/dump CINIVA_DATA=./data cargo run --relea
 ## Docker
 
 ```sh
-cp docker-compose.yml docker-compose.override.yml   # set your media path
+echo "MEDIA_ROOT=/path/to/share" >> .env          # holds Movies, TV and Downloads
 echo "RENDER_GID=$(stat -c %g /dev/dri/renderD128)" >> .env
-docker compose up -d
+echo "CINIVA_PLUGIN_SECRET=$(openssl rand -hex 32)" >> .env
+docker compose up -d                              # Ciniva only
+docker compose --profile downloads up -d          # plus qBittorrent, Prowlarr and the qBittorrent plugin
 ```
 
 The container never runs as root: it runs as an unprivileged user (UID/GID 1000 by default,
@@ -57,3 +64,32 @@ This applies to every container on the host, so it is not enabled by the compose
 
 GPU access: Intel/AMD need `/dev/dri` and the host's render group (`RENDER_GID`); NVIDIA needs
 the NVIDIA Container Toolkit. `docker exec ciniva ciniva-hwinfo` lists what was detected.
+
+## Plugins
+
+Plugins are separate containers that register with Ciniva over HTTP; Ciniva never runs their code. They describe
+their settings, pages and actions declaratively and every client (web, macOS) draws them natively. Protocol:
+[docs/plugins.md](docs/plugins.md). Plugins sit on an internal Docker network with no internet access and receive only
+the service key, so a compromised plugin can reach Ciniva's API and nothing else.
+
+- `plugins/qbittorrent`: a Downloads page with live progress, add magnet/URL/.torrent, pause/resume, sequential
+  ("download in order"), per-file priorities, Prowlarr search ranked by your preferred quality, languages and size,
+  and "Find episodes"/"Find releases" on show, season and movie pages. When a download finishes it rescans just that
+  folder (it appears within seconds) and notifies signed-in clients.
+- `plugins/jellyfin`: a Jellyfin-compatible API so Jellyfin apps, Swiftfin, Infuse and others can browse and play.
+
+## Downloads stack and its security
+
+qBittorrent and Prowlarr run in their own containers built from pinned, checksum-verified releases
+(`docker/qbittorrent`, `docker/prowlarr`), unprivileged and with read-only root filesystems:
+
+- qBittorrent sees the library read-only, so it can keep seeding existing torrents but cannot alter or delete them.
+  It can write only to `Downloads`, which Ciniva also scans. Incomplete files carry the `.!qB` extension, so Ciniva
+  never imports a half-downloaded file.
+- qBittorrent lets the internal network use its API without a password (for the plugin); its Web UI on port 8080 still
+  needs your login. Prowlarr's Web UI (port 9696) asks for a login on first visit; add your trackers there.
+
+## Apps
+
+- macOS: `apps/macos` (`./build.sh`, then `open build/Ciniva.app`). Direct-plays every format through mpv or
+  AVFoundation (Dolby Vision, HDR10, Atmos), with resume, credits/Up next, episode navigation and plugin pages.
