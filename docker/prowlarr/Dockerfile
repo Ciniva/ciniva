@@ -5,7 +5,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && curl -fsSL -o /prowlarr.tar.gz "$PROWLARR_URL" \
  && echo "$PROWLARR_SHA256  /prowlarr.tar.gz" | sha256sum -c - \
  && mkdir /app && tar xzf /prowlarr.tar.gz -C /app --strip-components=1 \
- && rm -rf /app/Prowlarr.Update
+ && rm -rf /app/Prowlarr.Update \
+ && printf 'PackageAuthor=Ciniva\nUpdateMethod=docker\nUpdateMethodMessage=Update by rebuilding the ciniva-prowlarr image\nBranch=master\n' > /app/package_info
 
 FROM debian:trixie-slim
 ARG UID=1000
