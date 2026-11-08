@@ -360,6 +360,14 @@ private struct PlayerContainer: View {
             )
             .tint(accent)
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { sliderWidth = $0 }
+            .background(alignment: .bottomLeading) {
+                if let a = controller.availableSecs, controller.duration > 0 {
+                    Capsule().fill(.white.opacity(0.35))
+                        .frame(width: sliderWidth * min(1, a / controller.duration), height: 3)
+                        .offset(y: 4)
+                        .allowsHitTesting(false)
+                }
+            }
             .onContinuousHover { phase in
                 if case .active(let p) = phase {
                     hoverFraction = min(1, max(0, p.x / max(1, sliderWidth)))

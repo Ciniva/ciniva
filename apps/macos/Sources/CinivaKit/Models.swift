@@ -74,6 +74,22 @@ public struct ContinueItem: Decodable, Identifiable, Hashable, Sendable {
     public var progress: Double { durationMs > 0 ? Double(positionMs) / Double(durationMs) : 0 }
 }
 
+public struct DownloadItem: Decodable, Identifiable, Hashable, Sendable {
+    public let id: String
+    public let title: String
+    public let subtitle: String?
+    public let name: String
+    public let size: Int64
+    public let progress: Double
+    public let availableFraction: Double
+    public let availableSecs: Double?
+    public let duration: Double?
+    public let playable: Bool
+    public let probe: MediaInfo?
+
+    public var label: String { [title, subtitle].compactMap { $0 }.joined(separator: " · ") }
+}
+
 public struct HomeData: Decodable, Sendable {
     public let continueWatching: [ContinueItem]
     public let recentMovies: [MovieCard]

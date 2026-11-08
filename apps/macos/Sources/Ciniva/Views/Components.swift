@@ -194,6 +194,46 @@ struct ContinueCard: View {
     }
 }
 
+struct DownloadCard: View {
+    @Environment(AppModel.self) private var model
+    let item: DownloadItem
+    var width: CGFloat = 280
+
+    var body: some View {
+        Button {
+            if item.playable {
+                model.play(PlaybackRequest(title: item.title, subtitle: item.subtitle, downloadId: item.id))
+            } else {
+                model.toast("Not enough has downloaded yet; try again in a minute.")
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                ZStack {
+                    LinearGradient(colors: [Color(white: 0.18), Color(white: 0.07)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    VStack(spacing: 6) {
+                        Image(systemName: item.playable ? "play.circle.fill" : "arrow.down.circle").font(.system(size: 36))
+                        Text("\(percent)%").font(.headline.monospacedDigit())
+                    }
+                    .foregroundStyle(.white.opacity(0.9))
+                }
+                .frame(width: width, height: width * 9 / 16)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(alignment: .bottom) { ProgressBar(progress: item.progress) }
+                Text(item.label).font(.callout.weight(.medium)).lineLimit(1)
+                Text(item.playable ? "Watch now · \(ready)" : "Downloading \(percent)% · \(ready)")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            .frame(width: width)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(item.name)
+    }
+
+    private var percent: Int { Int(item.progress * 100) }
+    private var ready: String { item.availableSecs.map { "\(Fmt.clock($0)) ready" } ?? "starting" }
+}
+
 struct Shelf<Content: View>: View {
     let title: String
     @ViewBuilder let content: () -> Content

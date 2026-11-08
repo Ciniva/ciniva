@@ -163,6 +163,12 @@ public struct CinivaClient: Sendable {
 
     public func file(_ id: Int) async throws -> MediaFile { try await get("/files/\(id)") }
 
+    public func downloads() async throws -> [DownloadItem] { try await get("/downloads") }
+
+    public func download(_ id: String) async throws -> DownloadItem { try await get("/downloads/\(id)") }
+
+    public func downloadStreamURL(_ id: String) -> URL { apiURL("/downloads/\(id)/stream", withToken: true) }
+
     public func trickplay(fileId: Int) async -> TrickplayManifest? {
         try? await get("/files/\(fileId)/trickplay")
     }

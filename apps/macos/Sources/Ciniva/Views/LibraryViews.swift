@@ -4,12 +4,18 @@ import SwiftUI
 struct HomeView: View {
     @Environment(AppModel.self) private var model
     @State private var home: HomeData?
+    @State private var downloads: [DownloadItem] = []
     @State private var error: String?
 
     var body: some View {
         ScrollView {
             if let home {
                 LazyVStack(alignment: .leading, spacing: 28) {
+                    if !downloads.isEmpty {
+                        Shelf(title: "Downloading") {
+                            ForEach(downloads) { DownloadCard(item: $0) }
+                        }
+                    }
                     if !home.continueWatching.isEmpty {
                         Shelf(title: "Continue Watching") {
                             ForEach(home.continueWatching) { ContinueCard(item: $0) }
@@ -40,10 +46,21 @@ struct HomeView: View {
         }
         .navigationTitle("Home")
         .task(id: model.libraryVersion) { await load() }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                await loadDownloads()
+            }
+        }
         .refreshable { await load() }
     }
 
+    private func loadDownloads() async {
+        if let d = try? await model.call({ try await $0.downloads() }) { downloads = d }
+    }
+
     private func load() async {
+        await loadDownloads()
         do {
             home = try await model.call { try await $0.home() }
             error = nil
