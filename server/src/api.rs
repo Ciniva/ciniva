@@ -69,6 +69,7 @@ pub fn router(ctx: Shared) -> Router {
         .route("/files/{id}/trickplay", get(trickplay_manifest))
         .route("/files/{id}/trickplay/{sheet}", get(trickplay_sheet))
         .route("/files/{id}/subtitles/{track}", get(subtitle))
+        .route("/files/{id}/credits", put(set_credits))
         .layer(middleware::from_fn_with_state(ctx.clone(), auth));
 
     let mut app = Router::new().nest("/api", api).with_state(ctx.clone());
@@ -223,12 +224,15 @@ struct FileView {
     duration: Option<f64>,
     probe: Option<SqlJson<MediaInfo>>,
     added_at: String,
+    credits_start: Option<f64>,
+    credits_source: Option<String>,
     #[sqlx(flatten)]
     #[serde(flatten)]
     progress: Progress,
 }
 
-const FILE_VIEW: &str = "SELECT f.id, f.path, f.size, f.duration, f.probe, f.added_at, p.position_ms, p.duration_ms, p.watched
+const FILE_VIEW: &str = "SELECT f.id, f.path, f.size, f.duration, f.probe, f.added_at, f.credits_start, f.credits_source,
+    p.position_ms, p.duration_ms, p.watched
     FROM files f LEFT JOIN progress p ON p.file_id = f.id";
 
 #[derive(Serialize, FromRow)]
@@ -510,15 +514,15 @@ async fn stream(State(ctx): State<Shared>, Path(id): Path<i64>, req: Request) ->
     Ok(resp)
 }
 
-/// Finished at 90 %, or 2 minutes before the end when that comes first, so short episodes count as watched
-/// before their end titles instead of near the end of them.
-fn is_watched(position_ms: i64, duration_ms: i64) -> bool {
+/// Finished at 90 %, 2 minutes before the end, or where the credits start, whichever comes first.
+fn is_watched(position_ms: i64, duration_ms: i64, credits: Option<f64>) -> bool {
     if duration_ms <= 0 {
         return false;
     }
     let pct = duration_ms as f64 * 0.9;
     let tail = if duration_ms > 240_000 { (duration_ms - 120_000) as f64 } else { pct };
-    position_ms as f64 >= pct.min(tail)
+    let credits = credits.map(|c| c * 1000.0).filter(|c| *c >= duration_ms as f64 * 0.5).unwrap_or(f64::MAX);
+    position_ms as f64 >= pct.min(tail).min(credits)
 }
 
 #[derive(Deserialize)]
@@ -528,7 +532,8 @@ struct ProgressBody {
 }
 
 async fn progress(State(ctx): State<Shared>, Path(id): Path<i64>, Json(b): Json<ProgressBody>) -> Result<StatusCode, ApiError> {
-    let watched = is_watched(b.position_ms, b.duration_ms);
+    let credits: Option<(Option<f64>,)> = sqlx::query_as("SELECT credits_start FROM files WHERE id = ?").bind(id).fetch_optional(&ctx.db).await?;
+    let watched = is_watched(b.position_ms, b.duration_ms, credits.and_then(|c| c.0));
     sqlx::query(
         "INSERT INTO progress (file_id, position_ms, duration_ms, watched, updated_at) VALUES (?, ?, ?, ?, datetime('now'))
          ON CONFLICT (file_id) DO UPDATE SET position_ms = excluded.position_ms, duration_ms = excluded.duration_ms,
@@ -722,6 +727,32 @@ async fn subtitle(State(ctx): State<Shared>, Path((id, track)): Path<(i64, Strin
     Ok(([(header::CONTENT_TYPE, "text/vtt; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], bytes).into_response())
 }
 
+#[derive(Deserialize)]
+struct CreditsBody {
+    /// "manual" pins `start` (null means the file has no credits); "auto" clears it and detects again.
+    mode: String,
+    start: Option<f64>,
+}
+
+async fn set_credits(State(ctx): State<Shared>, Path(id): Path<i64>, Json(b): Json<CreditsBody>) -> Result<StatusCode, ApiError> {
+    let q = if b.mode == "auto" {
+        sqlx::query("UPDATE files SET credits_start = NULL, credits_source = NULL, credits_version = 0 WHERE id = ?").bind(id)
+    } else {
+        sqlx::query("UPDATE files SET credits_start = ?, credits_source = 'manual', credits_version = ? WHERE id = ?")
+            .bind(b.start.filter(|s| *s > 0.0))
+            .bind(crate::credits::MANUAL)
+            .bind(id)
+    };
+    if q.execute(&ctx.db).await?.rows_affected() == 0 {
+        return Err(not_found());
+    }
+    if b.mode == "auto" {
+        let ctx = ctx.clone();
+        tokio::spawn(async move { library::credits_pass(&ctx).await });
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_watched;
@@ -729,11 +760,13 @@ mod tests {
     #[test]
     fn watched_threshold() {
         let min = 60_000;
-        assert!(!is_watched(12 * min + 59_000, 15 * min));
-        assert!(is_watched(13 * min, 15 * min));
-        assert!(!is_watched(152 * min, 169 * min));
-        assert!(is_watched(153 * min, 169 * min));
-        assert!(!is_watched(100_000, 180_000));
-        assert!(is_watched(162_000, 180_000));
+        assert!(!is_watched(12 * min + 59_000, 15 * min, None));
+        assert!(is_watched(13 * min, 15 * min, None));
+        assert!(!is_watched(152 * min, 169 * min, None));
+        assert!(is_watched(153 * min, 169 * min, None));
+        assert!(!is_watched(100_000, 180_000, None));
+        assert!(is_watched(162_000, 180_000, None));
+        assert!(is_watched(12 * min, 15 * min, Some(12.0 * 60.0)));
+        assert!(!is_watched(5 * min, 15 * min, Some(4.0 * 60.0)));
     }
 }

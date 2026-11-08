@@ -1,6 +1,6 @@
 [package]
 name = "ciniva"
-version = "0.5.6"
+version = "0.6.3"
 edition = "2021"
 license = "MIT"
 description = "Self-hosted media server: dump movies and shows in one folder, Ciniva sorts them with TMDB."

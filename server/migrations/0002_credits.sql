@@ -1,0 +1,3 @@
+ALTER TABLE files ADD COLUMN credits_start REAL;
+ALTER TABLE files ADD COLUMN credits_source TEXT;
+ALTER TABLE files ADD COLUMN credits_version INTEGER NOT NULL DEFAULT 0;

@@ -51,6 +51,7 @@ export function icon(name) {
     x: 'M6 6l12 12M18 6L6 18',
     next: 'M6 5v14l9-7zM17 5h2v14h-2z',
     refresh: 'M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7',
+    credits: 'M4 5h16v14H4zM8 9h8M8 12h8M8 15h5',
   };
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', '0 0 24 24');

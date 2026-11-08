@@ -1,5 +1,5 @@
 import { api, img, token, setToken, pref, setPref, AuthError } from './api.js';
-import { h, append, clear, icon, duration, bytes, fileName, progressBar, poster, movieCard, showCard, row, techBadges, toast, clock } from './dom.js';
+import { h, append, clear, icon, duration, bytes, fileName, progressBar, poster, movieCard, showCard, row, techBadges, toast, clock, modal } from './dom.js';
 import { openPlayer, seekSteps, SEEK_DEFAULTS } from './player.js';
 import { fixView, matchDialog } from './fix.js';
 
@@ -218,7 +218,54 @@ function fileDetails(f) {
   return h('div.file-details',
     h('div.badges', techBadges(f.probe).map((b) => h('span.tag', b))),
     h('div.file-path', { title: f.path }, fileName(f.path), ' · ', bytes(f.size)),
+    h('div.file-path', creditsLabel(f), ' · ', h('a.link', { href: '#', onclick: (e) => { e.preventDefault(); creditsDialog(f); } }, 'Edit')),
   );
+}
+
+const CREDITS_SOURCES = { chapters: 'from chapters', audio: 'matched across the season', picture: 'detected in the picture', manual: 'set by you' };
+
+function creditsLabel(f) {
+  if (f.credits_start) return `Credits at ${clock(f.credits_start)} (${CREDITS_SOURCES[f.credits_source] || 'detected'})`;
+  return f.credits_source === 'manual' ? 'No credits (set by you)' : 'Credits not detected';
+}
+
+function parseClock(text) {
+  const parts = text.trim().split(':').map(Number);
+  if (!parts.length || parts.some((n) => !Number.isFinite(n) || n < 0)) return null;
+  return parts.reduce((acc, n) => acc * 60 + n, 0);
+}
+
+function creditsDialog(f) {
+  const input = h('input', { type: 'text', value: f.credits_start ? clock(f.credits_start) : '', placeholder: 'h:mm:ss', 'aria-label': 'Credits start' });
+  const error = h('div.error.small');
+  const save = async (body) => {
+    try {
+      await api(`/files/${f.id}/credits`, { method: 'PUT', body });
+      close();
+      toast(body.mode === 'auto' ? 'Detecting credits again in the background' : 'Credits saved');
+      rerender();
+    } catch (e) {
+      error.textContent = e.message;
+    }
+  };
+  const { close } = modal(h('div.resume',
+    h('h2', 'End credits'),
+    h('p.muted', `${creditsLabel(f)}. Playback offers Up next or Skip credits from here, and the item counts as watched once you reach it.`),
+    h('label.field', 'Credits start at ', input),
+    error,
+    h('div.resume-actions',
+      h('button.btn.primary', {
+        onclick: () => {
+          const t = parseClock(input.value);
+          if (t === null || t <= 0 || (f.duration && t >= f.duration)) { error.textContent = 'Enter a time within the video, like 1:42:10'; return; }
+          save({ mode: 'manual', start: t });
+        },
+      }, 'Save'),
+      h('button.btn', { onclick: () => save({ mode: 'manual', start: null }) }, 'No credits'),
+      h('button.btn.ghost', { onclick: () => save({ mode: 'auto' }) }, 'Detect again'),
+    ),
+  ));
+  input.focus();
 }
 
 function playButtons(f, play) {
@@ -309,6 +356,7 @@ async function showView(el, id, params) {
       ),
       f ? h('div.ep-actions',
         h('button.icon-btn' + (f.watched ? '.on' : ''), { title: f.watched ? 'Mark unwatched' : 'Mark watched', onclick: async () => { await setWatched(e.files, !f.watched); rerender(); } }, icon('check')),
+        h('button.icon-btn', { title: creditsLabel(f), onclick: () => creditsDialog(f) }, icon('credits')),
         h('button.icon-btn', { title: 'Fix match', onclick: () => matchDialog(e.files, { kind: 'episode', query: s.title, season: e.season_number, episode: e.episode_number }, rerender) }, icon('wrench')),
       ) : null,
     );

@@ -448,6 +448,7 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
     if (!video.seeking && pendingSeek === null && video.currentTime > 0) lastGood = video.currentTime;
     render();
     report(false);
+    watchCredits();
   });
   video.addEventListener('progress', render);
   video.addEventListener('durationchange', render);
@@ -473,7 +474,7 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
       return;
     }
     api(`/files/${fileId}/progress`, { method: 'PUT', body: { position_ms: Math.floor(total() * 1000), duration_ms: Math.floor(total() * 1000) } }).catch(() => {});
-    showUpNext();
+    if (!upNextTimer) showUpNext(false);
   });
   muteBtn.addEventListener('click', () => { video.muted = !video.muted; });
   volume.addEventListener('input', () => { video.volume = Number(volume.value); video.muted = video.volume === 0; });
@@ -494,28 +495,63 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
     load(video.currentTime);
   });
 
-  async function showUpNext() {
-    if (!next) return;
-    const n = await next().catch(() => null);
-    if (!n || state.closed) return;
+  let upNextTimer = null;
+  let creditsShown = false;
+  const credits = file.credits_start && (!duration || file.credits_start < duration - 5) ? file.credits_start : null;
+
+  function hideUpNext() {
+    clearInterval(upNextTimer);
+    upNextTimer = null;
+    upNext.classList.remove('show');
+  }
+
+  async function showUpNext(atCredits) {
+    const n = next ? await next().catch(() => null) : null;
+    if (state.closed) return;
+    if (!n) {
+      if (!atCredits) return;
+      const skip = () => {
+        api(`/files/${fileId}/progress`, { method: 'PUT', keepalive: true, body: { position_ms: Math.floor(total() * 1000), duration_ms: Math.floor(total() * 1000) } }).catch(() => {});
+        hideUpNext();
+        close();
+      };
+      upNext.replaceChildren(h('div.upnext-actions',
+        h('button.btn.primary', { onclick: skip }, 'Skip credits'),
+        h('button.btn', { onclick: hideUpNext }, 'Watch credits')));
+      upNext.classList.add('show');
+      return;
+    }
     let left = 10;
     const counter = h('span', String(left));
-    const go = () => { clearInterval(timer); close({ keepHistory: true }).then(() => openPlayer({ ...n, startAt: 0, reuseHistory: true })); };
-    const cancel = () => { clearInterval(timer); upNext.classList.remove('show'); };
+    const go = () => { hideUpNext(); close({ keepHistory: true }).then(() => openPlayer({ ...n, startAt: 0, reuseHistory: true })); };
     upNext.replaceChildren(
       h('div.upnext-label', 'Up next'),
       h('div.upnext-title', n.subtitle || n.title),
       h('div.upnext-actions',
         h('button.btn.primary', { onclick: go }, icon('play'), ' Play in ', counter),
-        h('button.btn', { onclick: cancel }, 'Cancel')),
+        h('button.btn', { onclick: hideUpNext }, atCredits ? 'Watch credits' : 'Cancel')),
     );
     upNext.classList.add('show');
-    const timer = setInterval(() => {
+    clearInterval(upNextTimer);
+    upNextTimer = setInterval(() => {
       left -= 1;
       counter.textContent = String(left);
       if (left <= 0) go();
     }, 1000);
   }
+
+  function watchCredits() {
+    if (!credits || pendingSeek !== null) return;
+    const t = video.currentTime;
+    if (t < credits - 1) {
+      if (creditsShown) hideUpNext();
+      creditsShown = false;
+    } else if (!creditsShown && t < total() - 3) {
+      creditsShown = true;
+      showUpNext(true);
+    }
+  }
+
 
   function onKey(e) {
     if (e.target instanceof HTMLSelectElement || e.target instanceof HTMLInputElement) return;
@@ -546,6 +582,7 @@ export async function openPlayer({ fileId, title, subtitle, startAt, next, reuse
     window.removeEventListener('popstate', onPop);
     window.removeEventListener('pagehide', onUnload);
     clearTimeout(hideTimer);
+    clearInterval(upNextTimer);
     if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
     await teardown();
     root.remove();

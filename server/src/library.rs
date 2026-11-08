@@ -27,6 +27,7 @@ pub struct Ctx {
     pub keyframes: Arc<crate::transcode::Keyframes>,
     scan_lock: Mutex<()>,
     trickplay_lock: Mutex<()>,
+    credits_lock: Mutex<()>,
     pub status: RwLock<ScanStatus>,
 }
 
@@ -76,6 +77,7 @@ impl Ctx {
             keyframes,
             scan_lock: Mutex::new(()),
             trickplay_lock: Mutex::new(()),
+            credits_lock: Mutex::new(()),
             status: Default::default(),
         })
     }
@@ -122,9 +124,126 @@ pub async fn scan(ctx: &Arc<Ctx>) -> Result<Option<ScanReport>> {
     drop(s);
     if ctx.cfg.trickplay {
         let ctx = ctx.clone();
-        tokio::spawn(async move { trickplay_pass(&ctx).await });
+        tokio::spawn(async move {
+            credits_pass(&ctx).await;
+            trickplay_pass(&ctx).await;
+        });
     }
     result.map(Some)
+}
+
+/// Find where the end credits start in every matched file that has not been checked by the current detector.
+pub async fn credits_pass(ctx: &Arc<Ctx>) {
+    let Ok(_guard) = ctx.credits_lock.try_lock() else { return };
+    let started = std::time::Instant::now();
+    let cache = crate::credits::cache_dir(&ctx.cfg.data_dir);
+    let (ffmpeg, ffprobe) = (ctx.cfg.ffmpeg.as_str(), ctx.cfg.ffprobe.as_str());
+    let mut found = 0;
+    let mut checked = 0;
+
+    // Episodes: compare each one's ending with other episodes of the same season.
+    let episodes: Vec<(i64, String, f64, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT f.id, f.path, f.duration, e.show_id, e.season_number, MIN(e.episode_number), f.credits_version
+         FROM files f JOIN file_episodes fe ON fe.file_id = f.id JOIN episodes e ON e.id = fe.episode_id
+         WHERE f.kind = 'episode' AND f.duration > 0
+         GROUP BY f.id ORDER BY e.show_id, e.season_number, MIN(e.episode_number), f.id",
+    )
+    .fetch_all(&ctx.db)
+    .await
+    .unwrap_or_default();
+    let mut seasons: std::collections::BTreeMap<(i64, i64), Vec<(i64, String, f64, i64, i64)>> = Default::default();
+    for (id, path, duration, show, season, episode, version) in episodes {
+        seasons.entry((show, season)).or_default().push((id, path, duration, episode, version));
+    }
+    for eps in seasons.values() {
+        if eps.iter().all(|e| e.4 >= crate::credits::VERSION) {
+            continue;
+        }
+        let mut prints: HashMap<i64, crate::credits::Fingerprint> = HashMap::new();
+        for (i, (id, path, duration, episode, version)) in eps.iter().enumerate() {
+            if *version >= crate::credits::VERSION {
+                continue;
+            }
+            let path_ref = std::path::Path::new(path);
+            let mut marker = crate::credits::from_chapters(ffprobe, path_ref, *duration).await;
+            if marker.is_none() {
+                // Nearest other episodes on each side; another release of the same episode would match far more than
+                // the credits.
+                let before = eps[..i].iter().rev().filter(|o| o.3 != *episode).take(3);
+                let after = eps[i + 1..].iter().filter(|o| o.3 != *episode).take(3);
+                let neighbours: Vec<_> = before.chain(after).collect();
+                let mut others = vec![];
+                for (oid, opath, odur, ..) in std::iter::once(&eps[i]).chain(neighbours.iter().copied()) {
+                    if !prints.contains_key(oid) {
+                        match crate::credits::fingerprint(ffmpeg, std::path::Path::new(opath), *odur, &cache, *oid).await {
+                            Ok(fp) => {
+                                prints.insert(*oid, fp);
+                            }
+                            Err(e) => tracing::warn!(file_id = oid, "fingerprint failed: {e:#}"),
+                        }
+                    }
+                    if oid != id {
+                        if let Some(fp) = prints.get(oid) {
+                            others.push(fp.clone());
+                        }
+                    }
+                }
+                if let Some(own) = prints.get(id) {
+                    marker = crate::credits::from_shared_audio(own, &others, *duration);
+                }
+            }
+            if marker.is_none() {
+                marker = picture_credits(ctx, *id, path_ref, *duration, 30).await;
+            }
+            found += marker.is_some() as usize;
+            checked += 1;
+            store_credits(ctx, *id, marker).await;
+        }
+    }
+    let movies: Vec<(i64, String, f64)> = sqlx::query_as(
+        "SELECT id, path, duration FROM files WHERE kind = 'movie' AND duration > 0 AND credits_version < ?",
+    )
+    .bind(crate::credits::VERSION)
+    .fetch_all(&ctx.db)
+    .await
+    .unwrap_or_default();
+    for (id, path, duration) in movies {
+        let path = std::path::Path::new(&path);
+        let marker = match crate::credits::from_chapters(ffprobe, path, duration).await {
+            Some(m) => Some(m),
+            None => picture_credits(ctx, id, path, duration, 60).await,
+        };
+        found += marker.is_some() as usize;
+        checked += 1;
+        store_credits(ctx, id, marker).await;
+    }
+
+    if checked > 0 {
+        tracing::info!(checked, found, secs = started.elapsed().as_secs(), "credits detection finished");
+    }
+}
+
+async fn picture_credits(ctx: &Arc<Ctx>, id: i64, path: &std::path::Path, duration: f64, min_secs: usize) -> Option<crate::credits::Marker> {
+    let probe: Option<(Option<Json<probe::MediaInfo>>,)> =
+        sqlx::query_as("SELECT probe FROM files WHERE id = ?").bind(id).fetch_optional(&ctx.db).await.ok().flatten();
+    let video = probe.and_then(|p| p.0).and_then(|p| p.0.video).unwrap_or_default();
+    let lease = ctx.hw.acquire_decoder(crate::hwaccel::DecodeCodec::from_probe(&video.codec, video.bit_depth), crate::hwaccel::Purpose::Background);
+    let decode = if lease.hw_decode { crate::hwaccel::decode_args(&lease.device, false) } else { vec![] };
+    crate::credits::from_picture(&ctx.cfg.ffmpeg, &decode, path, duration, min_secs).await.unwrap_or_else(|e| {
+        tracing::warn!(file_id = id, "credits detection failed: {e:#}");
+        None
+    })
+}
+
+async fn store_credits(ctx: &Arc<Ctx>, id: i64, marker: Option<crate::credits::Marker>) {
+    let _ = sqlx::query("UPDATE files SET credits_start = ?, credits_source = ?, credits_version = ? WHERE id = ? AND credits_version < ?")
+        .bind(marker.map(|m| m.start))
+        .bind(marker.map(|m| m.source))
+        .bind(crate::credits::VERSION)
+        .bind(id)
+        .bind(crate::credits::MANUAL)
+        .execute(&ctx.db)
+        .await;
 }
 
 /// Generate seek thumbnails for every matched file that lacks them, one at a time in the background.
@@ -203,7 +322,8 @@ async fn scan_inner(ctx: &Arc<Ctx>) -> Result<ScanReport> {
                 report.added += 1;
             }
             Some((id, s, m, _)) if s != size || m != mtime => {
-                sqlx::query("UPDATE files SET size = ?, mtime = ?, guess = ?, kind = ?, probe = NULL, duration = NULL, movie_id = NULL WHERE id = ?")
+                sqlx::query("UPDATE files SET size = ?, mtime = ?, guess = ?, kind = ?, probe = NULL, duration = NULL, movie_id = NULL,
+                     credits_start = NULL, credits_source = NULL, credits_version = 0 WHERE id = ?")
                     .bind(size).bind(mtime).bind(&guess_json).bind(kind).bind(id)
                     .execute(&mut *tx).await?;
                 sqlx::query("DELETE FROM file_episodes WHERE file_id = ?").bind(id).execute(&mut *tx).await?;

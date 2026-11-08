@@ -152,6 +152,8 @@ input:focus { border-color: var(--accent); }
 .resume-bar { height: 4px; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
 .resume-bar > div { height: 100%; background: var(--accent); }
 .resume { display: grid; gap: 14px; padding-right: 24px; }
+.link { color: var(--accent); }
+.link:hover { text-decoration: underline; }
 .resume-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
 .tagline { font-style: italic; color: var(--muted); }
 .overview { color: #cfd4de; max-width: 72ch; }

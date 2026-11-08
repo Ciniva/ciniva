@@ -1,5 +1,6 @@
 pub mod api;
 pub mod config;
+pub mod credits;
 pub mod hwaccel;
 pub mod index;
 pub mod library;
