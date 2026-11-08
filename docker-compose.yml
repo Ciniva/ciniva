@@ -4,7 +4,7 @@
 # .env: CINIVA_PLUGIN_SECRET (random, e.g. `openssl rand -hex 32`), PROWLARR_API_KEY (random; same value in
 #       prowlarr/config.xml), optionally MEDIA_ROOT, RENDER_GID (stat -c %g /dev/dri/renderD128), CINIVA_UID/CINIVA_GID.
 # `docker compose up -d` runs Ciniva alone; `docker compose --profile downloads up -d` adds qBittorrent, Prowlarr and
-# the qBittorrent plugin.
+# the qBittorrent plugin; add `--profile tv` for the Jellyfin bridge (TV apps).
 
 x-hardening: &hardening
   user: "${CINIVA_UID:-1000}:${CINIVA_GID:-1000}"
@@ -112,6 +112,25 @@ services:
       PATH_MAP: ${MEDIA_ROOT:-/data/storage/share}/Downloads=/media/Downloads
     pids_limit: 128
     networks: [plugins]
+
+  # Jellyfin-compatible API for TV apps (Jellyfin, Swiftfin, Infuse…). Reachable from the LAN on 8096.
+  ciniva-jellyfin:
+    image: ciniva-plugin-jellyfin:0.1.0
+    build: plugins/jellyfin
+    container_name: ciniva-jellyfin
+    restart: unless-stopped
+    profiles: [tv]
+    <<: *hardening
+    ports:
+      - "8096:8096"
+    environment:
+      CINIVA_URL: http://ciniva-internal:8484
+      CINIVA_PLUGIN_SECRET: ${CINIVA_PLUGIN_SECRET}
+      PLUGIN_URL: http://ciniva-jellyfin:8096
+      PUBLIC_URL: ${JELLYFIN_PUBLIC_URL:-http://localhost:8096}
+      SERVER_NAME: Ciniva
+    pids_limit: 256
+    networks: [default, plugins]
 
 networks:
   # Internal only. qBittorrent lets this subnet use its API without a password

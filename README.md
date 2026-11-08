@@ -76,7 +76,9 @@ the service key, so a compromised plugin can reach Ciniva's API and nothing else
   ("download in order"), per-file priorities, Prowlarr search ranked by your preferred quality, languages and size,
   and "Find episodes"/"Find releases" on show, season and movie pages. When a download finishes it rescans just that
   folder (it appears within seconds) and notifies signed-in clients.
-- `plugins/jellyfin`: a Jellyfin-compatible API so Jellyfin apps, Swiftfin, Infuse and others can browse and play.
+- `plugins/jellyfin`: a Jellyfin-compatible API on port 8096 so Jellyfin apps (Android TV, webOS, Tizen, Roku), Swiftfin,
+  Infuse and Findroid can browse, play and sync progress. Add the server as `http://<server>:8096` and sign in with your
+  Ciniva account.
 
 ## Downloads stack and its security
 
