@@ -510,6 +510,17 @@ async fn stream(State(ctx): State<Shared>, Path(id): Path<i64>, req: Request) ->
     Ok(resp)
 }
 
+/// Finished at 90 %, or 2 minutes before the end when that comes first, so short episodes count as watched
+/// before their end titles instead of near the end of them.
+fn is_watched(position_ms: i64, duration_ms: i64) -> bool {
+    if duration_ms <= 0 {
+        return false;
+    }
+    let pct = duration_ms as f64 * 0.9;
+    let tail = if duration_ms > 240_000 { (duration_ms - 120_000) as f64 } else { pct };
+    position_ms as f64 >= pct.min(tail)
+}
+
 #[derive(Deserialize)]
 struct ProgressBody {
     position_ms: i64,
@@ -517,7 +528,7 @@ struct ProgressBody {
 }
 
 async fn progress(State(ctx): State<Shared>, Path(id): Path<i64>, Json(b): Json<ProgressBody>) -> Result<StatusCode, ApiError> {
-    let watched = b.duration_ms > 0 && b.position_ms as f64 / b.duration_ms as f64 > 0.9;
+    let watched = is_watched(b.position_ms, b.duration_ms);
     sqlx::query(
         "INSERT INTO progress (file_id, position_ms, duration_ms, watched, updated_at) VALUES (?, ?, ?, ?, datetime('now'))
          ON CONFLICT (file_id) DO UPDATE SET position_ms = excluded.position_ms, duration_ms = excluded.duration_ms,
@@ -709,4 +720,20 @@ async fn subtitle(State(ctx): State<Shared>, Path((id, track)): Path<(i64, Strin
     }
     let bytes = tokio::fs::read(vtt(index)).await?;
     Ok(([(header::CONTENT_TYPE, "text/vtt; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], bytes).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_watched;
+
+    #[test]
+    fn watched_threshold() {
+        let min = 60_000;
+        assert!(!is_watched(12 * min + 59_000, 15 * min));
+        assert!(is_watched(13 * min, 15 * min));
+        assert!(!is_watched(152 * min, 169 * min));
+        assert!(is_watched(153 * min, 169 * min));
+        assert!(!is_watched(100_000, 180_000));
+        assert!(is_watched(162_000, 180_000));
+    }
 }
