@@ -250,9 +250,9 @@ impl Tmdb {
         if let Some(y) = year {
             q.push(("year", y.to_string()));
             let with_year: Vec<MovieHit> = self.get::<Page<MovieHit>>("/search/movie", &q).await?.results;
-            if !with_year.is_empty() {
-                hits = with_year;
-            }
+            // Keep the unfiltered hits too: release names often carry the festival year, a year before TMDB's.
+            let seen: std::collections::HashSet<i64> = with_year.iter().map(|h| h.id).collect();
+            hits = with_year.into_iter().chain(hits.into_iter().filter(|h| !seen.contains(&h.id))).collect();
         }
         let mut scored: Vec<_> = hits
             .into_iter()

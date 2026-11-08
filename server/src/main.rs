@@ -31,6 +31,11 @@ async fn main() -> anyhow::Result<()> {
     if ciniva::auth::user_count(&ctx.db).await? == 0 {
         tracing::warn!("no accounts yet: open the web UI to create the administrator");
     }
+    match library::sweep_stale_caches(&ctx).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(files = n, "removed caches left over from deleted or reused file ids"),
+        Err(e) => tracing::warn!("cache sweep failed: {e:#}"),
+    }
     let scanner = ctx.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(scanner.cfg.scan_interval_mins.max(1) * 60));

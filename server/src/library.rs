@@ -66,6 +66,7 @@ pub enum Resolution {
 }
 
 const MOVIE_MIN: f64 = 0.88;
+const MOVIE_RUNTIME_MARGIN: f64 = 0.15;
 const TV_MIN: f64 = 0.85;
 const SEQUEL_MIN: f64 = 0.92;
 
@@ -342,6 +343,7 @@ async fn scan_inner(ctx: &Arc<Ctx>, scope: Option<Vec<PathBuf>>) -> Result<ScanR
     for (path, (id, ..)) in &existing {
         if !present.contains(path) && in_scope(path) {
             sqlx::query("DELETE FROM files WHERE id = ?").bind(id).execute(&ctx.db).await?;
+            purge_file_caches(&ctx.cfg.data_dir, *id).await;
             report.removed += 1;
         }
     }
@@ -359,15 +361,18 @@ async fn scan_inner(ctx: &Arc<Ctx>, scope: Option<Vec<PathBuf>>) -> Result<ScanR
     }
     let is_disc_extra = |path: &PathBuf| parser::disc_root(path).is_some_and(|root| disc_main.get(root).is_some_and(|(main, _)| *main != path));
     let mut tx = ctx.db.begin().await?;
+    let mut stale = Vec::new();
     for ((path, size, mtime), guess) in found.iter().zip(&guesses) {
         let key = path.to_string_lossy().into_owned();
         let guess_json = serde_json::to_string(guess)?;
         let kind = if parser::is_extra(path) || is_disc_extra(path) { "extra" } else { "pending" };
         match existing.get(&key) {
             None => {
-                sqlx::query("INSERT INTO files (path, size, mtime, guess, kind) VALUES (?, ?, ?, ?, ?)")
+                let id = sqlx::query("INSERT INTO files (path, size, mtime, guess, kind) VALUES (?, ?, ?, ?, ?)")
                     .bind(&key).bind(size).bind(mtime).bind(&guess_json).bind(kind)
-                    .execute(&mut *tx).await?;
+                    .execute(&mut *tx).await?
+                    .last_insert_rowid();
+                stale.push(id);
                 report.added += 1;
             }
             Some((id, s, m, _)) if s != size || m != mtime => {
@@ -376,6 +381,7 @@ async fn scan_inner(ctx: &Arc<Ctx>, scope: Option<Vec<PathBuf>>) -> Result<ScanR
                     .bind(size).bind(mtime).bind(&guess_json).bind(kind).bind(id)
                     .execute(&mut *tx).await?;
                 sqlx::query("DELETE FROM file_episodes WHERE file_id = ?").bind(id).execute(&mut *tx).await?;
+                stale.push(*id);
                 report.changed += 1;
             }
             Some((id, _, _, g)) if *g != guess_json => {
@@ -389,6 +395,9 @@ async fn scan_inner(ctx: &Arc<Ctx>, scope: Option<Vec<PathBuf>>) -> Result<ScanR
         }
     }
     tx.commit().await?;
+    for id in stale {
+        purge_file_caches(&ctx.cfg.data_dir, id).await;
+    }
 
     let to_probe: Vec<(i64, String)> =
         sqlx::query_as("SELECT id, path FROM files WHERE probe IS NULL AND kind != 'extra'").fetch_all(&ctx.db).await?;
@@ -474,13 +483,30 @@ async fn match_file(ctx: &Ctx, id: i64, path: &str, guess: &str, duration: Optio
     apply(ctx, id, resolution).await
 }
 
-async fn best_movie(tmdb: &Tmdb, variants: &[String], year: Option<i32>) -> Result<Option<Scored<MovieHit>>> {
+/// The best-scoring hits for the first title variant that matches at all, close enough to the best that the runtime
+/// may decide between them.
+async fn movie_candidates(tmdb: &Tmdb, variants: &[String], year: Option<i32>) -> Result<Vec<Scored<MovieHit>>> {
     for v in variants {
-        if let Some(best) = tmdb.search_movie(v, year).await?.into_iter().next().filter(|m| m.score >= MOVIE_MIN) {
-            return Ok(Some(best));
-        }
+        let hits = tmdb.search_movie(v, year).await?;
+        let Some(top) = hits.first().map(|h| h.score).filter(|s| *s >= MOVIE_MIN) else { continue };
+        return Ok(hits.into_iter().filter(|h| h.score >= MOVIE_MIN && h.score >= top - MOVIE_RUNTIME_MARGIN).take(4).collect());
     }
-    Ok(None)
+    Ok(Vec::new())
+}
+
+#[derive(Debug, PartialEq)]
+enum RuntimeFit {
+    Fits,
+    TooShort,
+    TooLong,
+}
+
+fn runtime_fit(duration: Option<f64>, runtime_mins: Option<i64>) -> RuntimeFit {
+    match (duration, runtime_mins) {
+        (Some(d), Some(rt)) if rt > 0 && d < rt as f64 * 60.0 * 0.5 => RuntimeFit::TooShort,
+        (Some(d), Some(rt)) if rt > 0 && d > rt as f64 * 60.0 * 1.5 + 600.0 => RuntimeFit::TooLong,
+        _ => RuntimeFit::Fits,
+    }
 }
 
 async fn best_tv(tmdb: &Tmdb, variants: &[String], year: Option<i32>) -> Result<Option<Scored<TvHit>>> {
@@ -528,13 +554,19 @@ pub async fn resolve(tmdb: &Tmdb, guess: &Guess, duration: Option<f64>, path: &s
     let variants = parser::title_variants(guess.title(), path);
     match guess {
         Guess::Movie { title, year } => {
-            if let Some(best) = best_movie(tmdb, &variants, *year).await? {
-                let details = tmdb.movie(best.hit.id).await?;
-                let too_short = match (duration, details.runtime) {
-                    (Some(d), Some(rt)) if rt > 0 => d < rt as f64 * 60.0 * 0.5,
-                    _ => false,
-                };
-                if !too_short {
+            let candidates = movie_candidates(tmdb, &variants, *year).await?;
+            if let Some(best) = candidates.first() {
+                let mut details = Vec::new();
+                for c in &candidates {
+                    details.push(tmdb.movie(c.hit.id).await?);
+                }
+                let known = |d: &&crate::tmdb::MovieDetails| d.runtime.is_some_and(|r| r > 0);
+                let fits = |d: &&crate::tmdb::MovieDetails| runtime_fit(duration, d.runtime) == RuntimeFit::Fits;
+                if let Some(d) = details.iter().find(|d| known(d) && fits(d)).or_else(|| details.iter().find(fits)) {
+                    return Ok(Resolution::Movie(d.id));
+                }
+                let details = &details[0];
+                if runtime_fit(duration, details.runtime) != RuntimeFit::TooShort {
                     return Ok(Resolution::Movie(best.hit.id));
                 }
                 return Ok(Resolution::Unmatched(format!(
@@ -818,4 +850,92 @@ pub async fn manual_match(ctx: &Arc<Ctx>, file_id: i64, kind: &str, tmdb_id: i64
         Resolution::Episodes { tv: tmdb_id, episodes: vec![(season.unwrap_or(1), episode.unwrap_or(1))] }
     };
     apply(ctx, file_id, resolution).await
+}
+
+/// Caches named only by file id. SQLite reuses the id of a deleted row, so they must go whenever an id is freed,
+/// handed to a new file, or its file changes.
+pub async fn purge_file_caches(data: &std::path::Path, id: i64) {
+    let _ = tokio::fs::remove_dir_all(trickplay::dir(data, id)).await;
+    let _ = tokio::fs::remove_file(crate::credits::cache_dir(data).join(format!("{id}.fp"))).await;
+    if let Ok(mut dir) = tokio::fs::read_dir(data.join("subtitles")).await {
+        let prefix = format!("{id}-");
+        while let Ok(Some(e)) = dir.next_entry().await {
+            if e.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = tokio::fs::remove_file(e.path()).await;
+            }
+        }
+    }
+}
+
+/// Removes id-keyed caches left behind before purging existed: ids that no longer exist, or caches older than the
+/// file that now owns the id.
+pub async fn sweep_stale_caches(ctx: &Ctx) -> Result<usize> {
+    let added: HashMap<i64, i64> =
+        sqlx::query_as::<_, (i64, i64)>("SELECT id, CAST(strftime('%s', added_at) AS INTEGER) FROM files")
+            .fetch_all(&ctx.db)
+            .await?
+            .into_iter()
+            .collect();
+    let data = &ctx.cfg.data_dir;
+    let id_of = |name: &str, dir: &str| -> Option<i64> {
+        match dir {
+            "trickplay" => name.parse().ok(),
+            "fingerprints" => name.strip_suffix(".fp")?.parse().ok(),
+            _ => name.split('-').next()?.parse().ok(),
+        }
+    };
+    let mut doomed = HashSet::new();
+    for dir in ["trickplay", "fingerprints", "subtitles"] {
+        let Ok(mut entries) = tokio::fs::read_dir(data.join(dir)).await else { continue };
+        while let Ok(Some(e)) = entries.next_entry().await {
+            let Some(id) = id_of(&e.file_name().to_string_lossy(), dir) else { continue };
+            let created = e.metadata().await.ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(UNIX_EPOCH).ok());
+            let stale = match (added.get(&id), created) {
+                (None, _) => true,
+                (Some(&added_at), Some(t)) => (t.as_secs() as i64) < added_at,
+                _ => false,
+            };
+            if stale {
+                doomed.insert(id);
+            }
+        }
+    }
+    for id in &doomed {
+        purge_file_caches(data, *id).await;
+    }
+    Ok(doomed.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{purge_file_caches, runtime_fit, RuntimeFit};
+
+    #[test]
+    fn runtime_fit_rejects_shorts_and_episodes() {
+        assert_eq!(runtime_fit(Some(6543.0), Some(18)), RuntimeFit::TooLong);
+        assert_eq!(runtime_fit(Some(6543.0), Some(108)), RuntimeFit::Fits);
+        assert_eq!(runtime_fit(Some(8100.0), Some(108)), RuntimeFit::Fits);
+        assert_eq!(runtime_fit(Some(2700.0), Some(120)), RuntimeFit::TooShort);
+        assert_eq!(runtime_fit(None, Some(18)), RuntimeFit::Fits);
+        assert_eq!(runtime_fit(Some(6543.0), None), RuntimeFit::Fits);
+    }
+
+    #[tokio::test]
+    async fn purge_removes_only_that_ids_caches() {
+        let data = std::env::temp_dir().join(format!("ciniva-purge-{}", std::process::id()));
+        for d in ["trickplay/825", "trickplay/82", "fingerprints", "subtitles"] {
+            std::fs::create_dir_all(data.join(d)).unwrap();
+        }
+        for f in ["trickplay/825/1.jpg", "trickplay/82/1.jpg", "fingerprints/825.fp", "fingerprints/82.fp", "subtitles/825-2.vtt", "subtitles/82-5.vtt"] {
+            std::fs::write(data.join(f), b"x").unwrap();
+        }
+        purge_file_caches(&data, 825).await;
+        assert!(!data.join("trickplay/825").exists());
+        assert!(!data.join("fingerprints/825.fp").exists());
+        assert!(!data.join("subtitles/825-2.vtt").exists());
+        assert!(data.join("trickplay/82/1.jpg").exists());
+        assert!(data.join("fingerprints/82.fp").exists());
+        assert!(data.join("subtitles/82-5.vtt").exists());
+        std::fs::remove_dir_all(&data).unwrap();
+    }
 }
