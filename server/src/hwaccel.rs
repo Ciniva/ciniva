@@ -161,6 +161,7 @@ pub struct Hardware {
     pub ffmpeg: String,
     pub devices: Vec<Arc<Device>>,
     pub filters: HashSet<String>,
+    pub bsfs: HashSet<String>,
 }
 
 impl Hardware {
@@ -570,6 +571,8 @@ pub async fn detect(ffmpeg: &str, work_dir: &Path, mode: &str) -> Result<Hardwar
         .filter_map(|l| l.split_whitespace().nth(1).map(str::to_string))
         .collect();
 
+    let bsfs: HashSet<String> = ffmpeg_list(ffmpeg, "-bsfs").await.lines().map(str::trim).filter(|l| !l.is_empty() && !l.ends_with(':')).map(str::to_string).collect();
+
     let mut candidates = if mode == "none" {
         vec![]
     } else if cfg!(target_os = "macos") {
@@ -619,5 +622,5 @@ pub async fn detect(ffmpeg: &str, work_dir: &Path, mode: &str) -> Result<Hardwar
         max_sessions: usize::MAX,
         active: AtomicUsize::new(0),
     }));
-    Ok(Hardware { ffmpeg: ffmpeg.to_string(), devices, filters })
+    Ok(Hardware { ffmpeg: ffmpeg.to_string(), devices, filters, bsfs })
 }

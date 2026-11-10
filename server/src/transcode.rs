@@ -35,6 +35,13 @@ pub struct Request {
     pub audio_copy: Option<String>,
     /// Comma-separated video codecs the client decodes; a matching source at full size is remuxed, not re-encoded.
     pub video_copy: Option<String>,
+    /// The client decodes Dolby Vision. When false, copied video has its Dolby Vision metadata stripped.
+    #[serde(default = "yes")]
+    pub dolby_vision: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn default_height() -> u32 {
@@ -189,7 +196,7 @@ impl Transcoder {
 
     pub async fn start_with(&self, file_id: i64, input: PathBuf, media: MediaInfo, request: Request, source: KeyframeSource) -> Result<Arc<Session>> {
         let Some(duration) = media.duration.filter(|d| *d > 0.0) else { bail!("unknown duration; probe the file first") };
-        let keyframes = if !remuxable(&media, &request) {
+        let keyframes = if !remuxable(&media, &request, &self.hw.bsfs) {
             None
         } else {
             match source {
@@ -206,8 +213,9 @@ impl Transcoder {
         let remux = keyframes.map(|kf| segment_bounds(&kf, duration)).filter(|b| b.len() > 1 || duration <= SEGMENT_SECS * 4.0);
         if let Some(bounds) = remux {
             let source = media.video.as_ref().map(|v| v.codec.clone()).unwrap_or_default();
+            let stripped = if dovi_strip(&media, &request).is_some() { ", Dolby Vision removed" } else { "" };
             let plan = Plan {
-                device: format!("Remux ({source} copied)"),
+                device: format!("Remux ({source} copied{stripped})"),
                 codec: match source.as_str() {
                     "hevc" => TargetCodec::Hevc,
                     "av1" => TargetCodec::Av1,
@@ -328,11 +336,31 @@ impl Transcoder {
 pub const REMUX_CODECS: &[&str] = &["h264", "hevc", "av1", "vp9"];
 
 /// The client said it decodes this exact stream (codec, depth, HDR), so it can be copied instead of re-encoded.
-fn remuxable(media: &MediaInfo, req: &Request) -> bool {
+fn remuxable(media: &MediaInfo, req: &Request, bsfs: &std::collections::HashSet<String>) -> bool {
     let Some(v) = &media.video else { return false };
     let accepts = req.video_copy.as_deref().is_some_and(|l| l.split(',').any(|c| c.trim() == v.codec));
-    // Profile 5 has no HDR10 base layer, so it only looks right on a Dolby Vision decoder.
-    accepts && REMUX_CODECS.contains(&v.codec.as_str()) && v.dolby_vision_profile != Some(5) && v.height as u32 <= req.max_height
+    let dovi_ok = match v.dolby_vision_profile {
+        None => true,
+        // Profile 5 has no HDR10 base layer, so it only looks right on a Dolby Vision decoder.
+        Some(5) => false,
+        Some(_) if req.dolby_vision => true,
+        // A decoder without Dolby Vision may stall on its metadata, so it must be stripped or the video re-encoded.
+        Some(_) => dovi_strip(media, req).is_some_and(|f| bsfs.contains(f.split('=').next().unwrap_or(f))),
+    };
+    accepts && dovi_ok && REMUX_CODECS.contains(&v.codec.as_str()) && v.height as u32 <= req.max_height
+}
+
+/// Bitstream filter that removes Dolby Vision metadata (and a profile 7 enhancement layer) from copied video.
+fn dovi_strip(media: &MediaInfo, req: &Request) -> Option<&'static str> {
+    let v = media.video.as_ref()?;
+    if req.dolby_vision || v.dolby_vision_profile.is_none() {
+        return None;
+    }
+    match v.codec.as_str() {
+        "hevc" => Some("hevc_metadata=remove_dovi=1"),
+        "av1" => Some("dovi_rpu=strip=1"),
+        _ => None,
+    }
 }
 
 /// Top-level MP4 boxes as (type, offset, size).
@@ -726,6 +754,9 @@ impl Session {
         let mut a: Vec<String> = vec!["-hide_banner".into(), "-nostdin".into(), "-v".into(), "warning".into(), "-y".into()];
         a.extend(["-ss".into(), format!("{start:.6}"), "-i".into(), self.input.display().to_string()]);
         a.extend(["-map".into(), "0:v:0".into(), "-c:v".into(), "copy".into()]);
+        if let Some(bsf) = dovi_strip(&self.media, &self.request) {
+            a.extend(["-bsf:v".into(), bsf.into()]);
+        }
         a.extend(self.audio_args());
         a.extend(["-sn".into(), "-dn".into(), "-map_metadata".into(), "-1".into(), "-map_chapters".into(), "-1".into()]);
         // A constant 1 s lead keeps B-frame decode times positive, so every run uses identical timestamps.
@@ -959,5 +990,49 @@ pub mod trickplay {
         tokio::fs::rename(&tmp, &out).await?;
         tracing::info!(file_id, sheets, device = %manifest.device, secs = started.elapsed().as_secs_f32(), "trickplay generated");
         Ok(manifest)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::probe::VideoInfo;
+
+    fn dv_hevc(profile: i64) -> MediaInfo {
+        MediaInfo {
+            video: Some(VideoInfo { codec: "hevc".into(), height: 2160, dolby_vision_profile: Some(profile), hdr: Some("hdr10".into()), ..Default::default() }),
+            ..Default::default()
+        }
+    }
+
+    fn request(dolby_vision: bool) -> Request {
+        serde_json::from_value(serde_json::json!({ "max_height": 2160, "video_copy": "hevc", "dolby_vision": dolby_vision })).unwrap()
+    }
+
+    #[test]
+    fn dolby_vision_defaults_to_supported() {
+        let r: Request = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(r.dolby_vision);
+    }
+
+    #[test]
+    fn strips_dolby_vision_for_clients_without_it() {
+        let bsfs = ["hevc_metadata".to_string()].into_iter().collect();
+        assert!(remuxable(&dv_hevc(8), &request(false), &bsfs));
+        assert_eq!(dovi_strip(&dv_hevc(8), &request(false)), Some("hevc_metadata=remove_dovi=1"));
+        assert_eq!(dovi_strip(&dv_hevc(8), &request(true)), None);
+    }
+
+    #[test]
+    fn re_encodes_when_the_strip_filter_is_missing() {
+        assert!(!remuxable(&dv_hevc(8), &request(false), &Default::default()));
+        assert!(remuxable(&dv_hevc(8), &request(true), &Default::default()));
+    }
+
+    #[test]
+    fn never_copies_profile_5() {
+        let bsfs = ["hevc_metadata".to_string()].into_iter().collect();
+        assert!(!remuxable(&dv_hevc(5), &request(true), &bsfs));
+        assert!(!remuxable(&dv_hevc(5), &request(false), &bsfs));
     }
 }
