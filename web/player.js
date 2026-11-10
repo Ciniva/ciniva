@@ -12,6 +12,7 @@ const QUALITIES = [
 
 const TEXT_SUBS = new Set(['subrip', 'srt', 'ass', 'ssa', 'mov_text', 'webvtt', 'text']);
 
+const trace = (...a) => console.log('[player]', ...a);
 const testVideo = document.createElement('video');
 const mse = (t) => { try { return !!window.MediaSource?.isTypeSupported(t); } catch { return false; } };
 const can = (t) => testVideo.canPlayType(t) !== '' || mse(t);
@@ -226,6 +227,7 @@ export async function openPlayer({ fileId, download, title, subtitle, startAt, n
   let recoveries = 0;
   async function recover() {
     if (state.closed || recovering) return;
+    trace('recover', recoveries);
     if (Date.now() - recoveredAt > 60000) recoveries = 0;
     if (recoveries >= 12) {
       fail('Lost connection to the server.');
@@ -284,9 +286,15 @@ export async function openPlayer({ fileId, download, title, subtitle, startAt, n
       return;
     }
     seekTries++;
+    trace('seek', video.currentTime.toFixed(2), '->', pendingSeek, 'try', seekTries);
     video.currentTime = pendingSeek;
   }
   for (const ev of ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'timeupdate']) video.addEventListener(ev, applyPendingSeek);
+  for (const ev of ['loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'playing', 'waiting', 'stalled', 'seeking', 'seeked', 'pause', 'emptied', 'abort', 'error', 'ended']) {
+    video.addEventListener(ev, () => trace(ev, 't=' + video.currentTime.toFixed(2), 'ready=' + video.readyState, 'net=' + video.networkState,
+      'buf=' + Array.from({ length: video.buffered.length }, (_, i) => `${video.buffered.start(i).toFixed(1)}-${video.buffered.end(i).toFixed(1)}`).join(','),
+      'pending=' + pendingSeek, video.error ? `err=${video.error.code} ${video.error.message}` : ''));
+  }
 
   async function load(position, { quiet } = {}) {
     pendingSeek = position > 1 ? position : null;
