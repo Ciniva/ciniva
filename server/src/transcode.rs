@@ -38,6 +38,9 @@ pub struct Request {
     /// The client decodes Dolby Vision. When false, copied video has its Dolby Vision metadata stripped.
     #[serde(default = "yes")]
     pub dolby_vision: bool,
+    /// HLS segment container the client asked for: "ts"/"mpegts" or "mp4"/"fmp4". Unset keeps the defaults.
+    #[serde(default)]
+    pub container: Option<String>,
 }
 
 fn yes() -> bool {
@@ -61,6 +64,30 @@ pub enum TargetCodec {
     H264,
     Hevc,
     Av1,
+}
+
+impl TargetCodec {
+    /// The codec's name as ffprobe reports it.
+    fn name(self) -> &'static str {
+        match self {
+            TargetCodec::H264 => "h264",
+            TargetCodec::Hevc => "hevc",
+            TargetCodec::Av1 => "av1",
+        }
+    }
+}
+
+/// HLS segment container for video in `codec`. The client's choice wins when MPEG-TS can carry the codec (players
+/// take H.264 and HEVC in TS, not AV1 or VP9). Otherwise remuxes are fMP4, and encodes are MPEG-TS for H.264 and fMP4
+/// for the rest.
+fn segment_container(req: &Request, codec: &str, remux: bool) -> &'static str {
+    let ts_ok = matches!(codec, "h264" | "hevc");
+    match req.container.as_deref().map(|c| c.trim().to_ascii_lowercase()).as_deref() {
+        Some("ts" | "mpegts") if ts_ok => "mpegts",
+        Some("ts" | "mpegts" | "mp4" | "fmp4") => "fmp4",
+        _ if !remux && codec == "h264" => "mpegts",
+        _ => "fmp4",
+    }
 }
 
 /// Everything decided about how a stream is produced.
@@ -221,7 +248,7 @@ impl Transcoder {
                     "av1" => TargetCodec::Av1,
                     _ => TargetCodec::H264,
                 },
-                container: "fmp4",
+                container: segment_container(&request, &source, true),
                 hw_decode: false,
                 encoder: "copy",
                 tonemap: None,
@@ -272,7 +299,7 @@ impl Transcoder {
         let plan = Plan {
             device: d.label(),
             codec: request.codec,
-            container: if request.codec == TargetCodec::H264 { "mpegts" } else { "fmp4" },
+            container: segment_container(&request, request.codec.name(), false),
             hw_decode: lease.hw_decode,
             encoder: hwaccel::encoder_name(d.api, target),
             tonemap,
@@ -660,12 +687,12 @@ impl Session {
         }
     }
 
-    /// Segment payload. Remuxed segments are standalone MP4 files; serve only their fragments (the shared
+    /// Segment payload. Remuxed fMP4 segments are standalone MP4 files; serve only their fragments (the shared
     /// header goes out once as init.mp4).
     pub async fn media_segment(&self, n: u64) -> Result<Vec<u8>> {
         let path = self.segment(n).await?;
         let bytes = tokio::fs::read(&path).await?;
-        if !self.plan.remux {
+        if !self.plan.remux || !self.fmp4() {
             return Ok(bytes);
         }
         Ok(mp4_boxes(&bytes)
@@ -762,14 +789,21 @@ impl Session {
         // A constant 1 s lead keeps B-frame decode times positive, so every run uses identical timestamps.
         a.extend(["-output_ts_offset".into(), format!("{:.6}", start + REMUX_LEAD)]);
         a.extend(["-avoid_negative_ts".into(), "disabled".into(), "-strict".into(), "experimental".into()]);
-        if self.media.video.as_ref().is_some_and(|v| v.codec == "hevc") {
+        // hvc1 is an MP4 sample entry; MPEG-TS has no codec tags.
+        if self.fmp4() && self.media.video.as_ref().is_some_and(|v| v.codec == "hevc") {
             a.extend(["-tag:v".into(), "hvc1".into()]);
         }
-        a.extend([
-            "-f".into(), "segment".into(),
-            "-segment_format".into(), "mp4".into(),
-            "-segment_format_options".into(), "movflags=+frag_keyframe+empty_moov+default_base_moof+frag_discont+delay_moov".into(),
-        ]);
+        if self.fmp4() {
+            a.extend([
+                "-f".into(), "segment".into(),
+                "-segment_format".into(), "mp4".into(),
+                "-segment_format_options".into(), "movflags=+frag_keyframe+empty_moov+default_base_moof+frag_discont+delay_moov".into(),
+            ]);
+        } else {
+            // One MPEG-TS muxer for the whole run that re-sends PAT/PMT at each cut, like the hls muxer, so
+            // continuity counters carry on from one segment to the next.
+            a.extend(["-f".into(), "segment".into(), "-segment_format".into(), "mpegts".into(), "-individual_header_trailer".into(), "0".into()]);
+        }
         // Cut times are compared before the output offset is applied, so they are relative to `start`.
         let times: Vec<String> = self.bounds[i + 1..].iter().map(|t| format!("{:.3}", t - start)).collect();
         if !times.is_empty() {
@@ -781,7 +815,7 @@ impl Session {
             "-segment_start_number".into(), n.to_string(),
             "-segment_list".into(), self.dir.join(format!("run-{n}.csv")).display().to_string(),
             "-segment_list_type".into(), "csv".into(),
-            self.dir.join("%d.m4s").display().to_string(),
+            self.dir.join(format!("%d.{}", self.ext())).display().to_string(),
         ]);
         a
     }
@@ -880,7 +914,7 @@ impl Session {
         a.extend(self.audio_args());
         a.extend(["-sn".into(), "-dn".into(), "-map_metadata".into(), "-1".into(), "-map_chapters".into(), "-1".into()]);
         a.extend(["-output_ts_offset".into(), format!("{start:.3}")]);
-        if matches!(target, EncodeCodec::Hevc | EncodeCodec::Hevc10) {
+        if self.fmp4() && matches!(target, EncodeCodec::Hevc | EncodeCodec::Hevc10) {
             a.extend(["-tag:v".into(), "hvc1".into()]);
         }
         a.extend(["-f".into(), "hls".into(), "-hls_time".into(), format!("{SEGMENT_SECS}")]);
@@ -1027,6 +1061,32 @@ mod tests {
     fn re_encodes_when_the_strip_filter_is_missing() {
         assert!(!remuxable(&dv_hevc(8), &request(false), &Default::default()));
         assert!(remuxable(&dv_hevc(8), &request(true), &Default::default()));
+    }
+
+    fn with_container(container: Option<&str>) -> Request {
+        serde_json::from_value(serde_json::json!({ "max_height": 2160, "video_copy": "hevc", "container": container })).unwrap()
+    }
+
+    #[test]
+    fn segment_container_follows_the_client() {
+        assert_eq!(serde_json::from_value::<Request>(serde_json::json!({})).unwrap().container, None);
+        // HEVC remux and HEVC encode: unset stays fMP4, TS is honoured.
+        for remux in [true, false] {
+            assert_eq!(segment_container(&with_container(None), "hevc", remux), "fmp4");
+            assert_eq!(segment_container(&with_container(Some("ts")), "hevc", remux), "mpegts");
+            assert_eq!(segment_container(&with_container(Some("mpegts")), "hevc", remux), "mpegts");
+            assert_eq!(segment_container(&with_container(Some("fmp4")), "hevc", remux), "fmp4");
+            assert_eq!(segment_container(&with_container(Some("mp4")), "hevc", remux), "fmp4");
+        }
+        // Defaults for H.264: encodes MPEG-TS, remuxes fMP4.
+        assert_eq!(segment_container(&with_container(None), "h264", false), "mpegts");
+        assert_eq!(segment_container(&with_container(None), "h264", true), "fmp4");
+        assert_eq!(segment_container(&with_container(Some("mp4")), "h264", false), "fmp4");
+        assert_eq!(segment_container(&with_container(Some("ts")), "h264", true), "mpegts");
+        // AV1 and VP9 don't go in MPEG-TS; unknown values keep the default.
+        assert_eq!(segment_container(&with_container(Some("ts")), "av1", false), "fmp4");
+        assert_eq!(segment_container(&with_container(Some("TS")), "vp9", true), "fmp4");
+        assert_eq!(segment_container(&with_container(Some("mkv")), "h264", false), "mpegts");
     }
 
     #[test]
