@@ -552,7 +552,7 @@ async function settingsView(el) {
         ))),
       )),
       hw.transcodes.length
-        ? h('div', h('h3', 'Active streams'), h('ul.plain', hw.transcodes.map((t) => h('li', `File ${t.file_id}: ${t.plan.codec.toUpperCase()} on ${t.plan.device}${t.plan.tonemap ? ', tone map ' + t.plan.tonemap : ''}`))))
+        ? h('div', h('h3', 'Active streams'), h('ul.plain', hw.transcodes.map((t) => h('li', t.plan.remux ? `File ${t.file_id}: direct stream, ${t.plan.codec.toUpperCase()} copied (no transcoding)` : `File ${t.file_id}: ${t.plan.codec.toUpperCase()} on ${t.plan.device}${t.plan.tonemap ? ', tone map ' + t.plan.tonemap : ''}`))))
         : h('p.muted', 'No active streams.'),
     ),
     h('section.panel',

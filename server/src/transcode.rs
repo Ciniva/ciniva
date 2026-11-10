@@ -256,7 +256,7 @@ impl Transcoder {
                 hdr_out: false,
                 remux: true,
             };
-            return self.register(file_id, input, media, request, duration, bounds, self.hw.cpu_lease(), plan).await;
+            return self.register(file_id, input, media, request, duration, bounds, self.hw.copy_lease(), plan).await;
         }
         let video = media.video.clone().unwrap_or_default();
         let source = DecodeCodec::from_probe(&video.codec, video.bit_depth);

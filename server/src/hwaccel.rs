@@ -141,11 +141,14 @@ impl Device {
 pub struct Lease {
     pub device: Arc<Device>,
     pub hw_decode: bool,
+    counted: bool,
 }
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        self.device.active.fetch_sub(1, Ordering::Relaxed);
+        if self.counted {
+            self.device.active.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -179,10 +182,9 @@ impl Hardware {
 
     /// Least-loaded device that can encode `target`, preferring one that can also decode `source`
     /// and, when HDR must become SDR, one that tone maps on the GPU.
-    pub fn cpu_lease(&self) -> Lease {
-        let device = self.software();
-        device.active.fetch_add(1, Ordering::Relaxed);
-        Lease { device, hw_decode: false }
+    /// Remuxing only copies packets, so it doesn't occupy an encoder slot.
+    pub fn copy_lease(&self) -> Lease {
+        Lease { device: self.software(), hw_decode: false, counted: false }
     }
 
     pub fn acquire(&self, source: Option<DecodeCodec>, target: EncodeCodec, purpose: Purpose, tonemap: bool) -> Lease {
@@ -205,7 +207,7 @@ impl Hardware {
             None => (self.software(), false),
         };
         device.active.fetch_add(1, Ordering::Relaxed);
-        Lease { device, hw_decode }
+        Lease { device, hw_decode, counted: true }
     }
 
     /// Device for decode-only work (thumbnails), no encoder needed.
@@ -226,7 +228,7 @@ impl Hardware {
             None => (self.software(), false),
         };
         device.active.fetch_add(1, Ordering::Relaxed);
-        Lease { device, hw_decode }
+        Lease { device, hw_decode, counted: true }
     }
 }
 
