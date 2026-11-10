@@ -723,11 +723,15 @@ async fn transcode_playlist(State(ctx): State<Shared>, Path(sid): Path<String>, 
     Ok(m3u8(s.playlist("", &token_query(uri.query()))))
 }
 
-async fn transcode_segment(State(ctx): State<Shared>, Path((sid, segment)): Path<(String, String)>) -> Result<Response, ApiError> {
+async fn transcode_segment(
+    State(ctx): State<Shared>,
+    Path((sid, segment)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, ApiError> {
     let s = ctx.transcoder.get(&sid).await.ok_or_else(not_found)?;
     if segment == "init.mp4" {
         let bytes = s.init_segment().await?;
-        return Ok(([(header::CONTENT_TYPE, "video/mp4"), (header::CACHE_CONTROL, "no-store")], bytes.to_vec()).into_response());
+        return Ok(ranged(&headers, "video/mp4", bytes.to_vec()));
     }
     let n: u64 = segment
         .strip_suffix(".ts")
@@ -735,8 +739,44 @@ async fn transcode_segment(State(ctx): State<Shared>, Path((sid, segment)): Path
         .and_then(|n| n.parse().ok())
         .ok_or_else(not_found)?;
     let bytes = s.media_segment(n).await?;
-    let ctype = s.content_type();
-    Ok(([(header::CONTENT_TYPE, ctype), (header::CACHE_CONTROL, "no-store")], bytes).into_response())
+    Ok(ranged(&headers, s.content_type(), bytes))
+}
+
+/// Single byte range of a `len`-byte body; `None` when the header is absent or not a single range.
+fn byte_range(header: &str, len: usize) -> Option<Result<(usize, usize), ()>> {
+    let spec = header.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (a, b) = spec.split_once('-')?;
+    let (a, b) = (a.trim(), b.trim());
+    let range = if a.is_empty() {
+        let n: usize = b.parse().ok()?;
+        (len.saturating_sub(n), len.checked_sub(1)?)
+    } else {
+        let start: usize = a.parse().ok()?;
+        let end = if b.is_empty() { len.saturating_sub(1) } else { b.parse::<usize>().ok()?.min(len.saturating_sub(1)) };
+        (start, end)
+    };
+    Some(if range.0 < len && range.0 <= range.1 { Ok(range) } else { Err(()) })
+}
+
+/// Segment response that honours Range: Safari on iOS fetches large media segments in byte ranges and loops when
+/// every range comes back as the whole body.
+fn ranged(headers: &axum::http::HeaderMap, ctype: &'static str, bytes: Vec<u8>) -> Response {
+    let base = [(header::CONTENT_TYPE, ctype), (header::CACHE_CONTROL, "no-store"), (header::ACCEPT_RANGES, "bytes")];
+    let len = bytes.len();
+    match headers.get(header::RANGE).and_then(|v| v.to_str().ok()).and_then(|h| byte_range(h, len)) {
+        None => (base, bytes).into_response(),
+        Some(Ok((start, end))) => (
+            StatusCode::PARTIAL_CONTENT,
+            base,
+            [(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}"))],
+            bytes[start..=end].to_vec(),
+        )
+            .into_response(),
+        Some(Err(())) => (StatusCode::RANGE_NOT_SATISFIABLE, [(header::CONTENT_RANGE, format!("bytes */{len}"))]).into_response(),
+    }
 }
 
 async fn transcode_stop(State(ctx): State<Shared>, Path(sid): Path<String>) -> StatusCode {
@@ -828,7 +868,18 @@ async fn set_credits(State(ctx): State<Shared>, Path(id): Path<i64>, Json(b): Js
 
 #[cfg(test)]
 mod tests {
-    use super::is_watched;
+    use super::{byte_range, is_watched};
+
+    #[test]
+    fn byte_ranges() {
+        assert_eq!(byte_range("bytes=0-1", 10), Some(Ok((0, 1))));
+        assert_eq!(byte_range("bytes=4-", 10), Some(Ok((4, 9))));
+        assert_eq!(byte_range("bytes=-3", 10), Some(Ok((7, 9))));
+        assert_eq!(byte_range("bytes=5-100", 10), Some(Ok((5, 9))));
+        assert_eq!(byte_range("bytes=10-", 10), Some(Err(())));
+        assert_eq!(byte_range("bytes=0-1,4-5", 10), None);
+        assert_eq!(byte_range("items=0-1", 10), None);
+    }
 
     #[test]
     fn watched_threshold() {
