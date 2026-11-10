@@ -101,6 +101,7 @@ qBittorrent and Prowlarr run in their own containers built from pinned, checksum
 
 ## Images
 
-GitHub Actions tests the server and publishes `ghcr.io/ciniva/ciniva` on every push to `main` (`latest` and
-`sha-<short>`; `X.Y.Z` for `vX.Y.Z` tags). The qBittorrent, Prowlarr and plugin images come from their own repositories
-the same way. All images are public, so `docker compose pull` needs no login.
+Pushing a `vX.Y.Z` tag (matching `server/Cargo.toml`) makes GitHub Actions test the server and publish
+`ghcr.io/ciniva/ciniva` as `X.Y.Z`, `latest` and `sha-<short>`. Pull requests are only tested; any branch can be built
+and published as `sha-<short>` by running the workflow by hand. The qBittorrent, Prowlarr and plugin images come from
+their own repositories the same way. All images are public, so `docker compose pull` needs no login.
