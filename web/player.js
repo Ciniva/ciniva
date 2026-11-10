@@ -272,19 +272,25 @@ export async function openPlayer({ fileId, download, title, subtitle, startAt, n
 
   // Safari's native HLS ignores a seek made at loadedmetadata, so keep re-applying it until playback is
   // actually there, and save no progress before that (it would overwrite the resume point).
+  // Safari may land on the keyframe before the target (up to a segment early on long-GOP remuxes); re-seeking then
+  // just lands there again and re-downloads the segment forever, so a landing shortly before the target counts.
   let pendingSeek = null;
+  let seekTries = 0;
   function applyPendingSeek() {
-    if (pendingSeek === null || video.readyState < 1) return;
-    if (Math.abs(video.currentTime - pendingSeek) < 3) {
+    if (pendingSeek === null || video.readyState < 1 || video.seeking) return;
+    const early = pendingSeek - video.currentTime;
+    if (Math.abs(early) < 3 || (seekTries > 0 && early > 0 && early < 20) || seekTries >= 8) {
       pendingSeek = null;
       return;
     }
-    if (!video.seeking) video.currentTime = pendingSeek;
+    seekTries++;
+    video.currentTime = pendingSeek;
   }
   for (const ev of ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'timeupdate']) video.addEventListener(ev, applyPendingSeek);
 
   async function load(position, { quiet } = {}) {
     pendingSeek = position > 1 ? position : null;
+    seekTries = 0;
     if (position) lastGood = position;
     message.textContent = '';
     root.classList.add('loading');
