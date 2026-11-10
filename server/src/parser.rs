@@ -90,14 +90,15 @@ static NXNN: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)(?:^|[^\dx])(\d{1,2})x(
 static SEASON_EPISODE_WORDS: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bseason[ ._-]*(\d{1,3})[ ._-]*(?:episode|ep)[ ._-]*(\d{1,4})\b").unwrap());
 static DATE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b((?:19|20)\d{2})[ ._-](\d{2})[ ._-](\d{2})\b").unwrap());
-static EP_ONLY: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)(?:^|[ ._\-\[])(?:ep(?:isode)?)[ ._-]*(\d{1,4})[a-c]?\b").unwrap());
+static EP_ONLY: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)(?:^|[ ._\-\[])(?:ep(?:isode)?|эпизод|серия|серія)[ ._-]*(\d{1,4})[a-c]?\b").unwrap());
 static SEASON_PACK_DIR: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^(.*?)[ ._-]*\b(?:S(\d{1,2})|season[ ._-]*(\d{1,2}))\b(?:[ ._-]|$)").unwrap());
+    Lazy::new(|| Regex::new(r"(?i)^(.*?)[ ._-]*\b(?:S(\d{1,2})|(?:season|сезон)[: ._-]*(\d{1,2}))\b(?:[ ._-]|$)").unwrap());
 static LEADING_NUMBER: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\d{1,3})(?:\.|\s-|\s|_)\s*\S").unwrap());
 static TRAILING_NUMBER: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(.*\S)\s+(\d{1,3})$").unwrap());
 static ANIME_DASH: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s-\s(\d{1,4})(?:v\d)?(?:\s|$|\(|\[)").unwrap());
 static YEAR: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b((?:19|20)\d{2})\b").unwrap());
-static SEASON_DIR: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^(?:season|series|staffel|saison|s)[ ._-]*(\d{1,3})$").unwrap());
+static SEASON_DIR: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^(?:season|series|staffel|saison|сезон|s)[: ._-]*(\d{1,3})$").unwrap());
+static PARENS: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(([^()]+)\)").unwrap());
 static BRACKETS: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[[^\]]*\]|\{[^}]*\}").unwrap());
 static JUNK: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
@@ -207,6 +208,12 @@ pub fn title_variants(primary: &str, path: &Path) -> Vec<String> {
     if let Some((head, _)) = primary.split_once(" - ") {
         push(head);
     }
+    // Russian trackers put the original title in parentheses: `Русское название (Original Title) Сезон 1`.
+    for c in PARENS.captures_iter(primary) {
+        if c[1].chars().any(|ch| ch.is_ascii_alphabetic()) {
+            push(&c[1]);
+        }
+    }
     let words: Vec<&str> = primary.split_whitespace().collect();
     let latin: Vec<&str> = words.iter().copied().filter(|w| w.chars().all(|c| c.is_ascii() )).collect();
     let other: Vec<&str> = words.iter().copied().filter(|w| !w.chars().all(|c| c.is_ascii())).collect();
@@ -214,7 +221,7 @@ pub fn title_variants(primary: &str, path: &Path) -> Vec<String> {
         push(&latin.join(" "));
         push(&other.join(" "));
     }
-    const GENERIC: &[&str] = &["tv", "movies", "movie", "shows", "series", "media", "share", "films", "anime", "dump", "downloads", "data", "storage"];
+    const GENERIC: &[&str] = &["tv", "movies", "movie", "shows", "series", "media", "share", "films", "anime", "dump", "downloads", "data", "storage", "torrent", "torrents"];
     for dir in path.ancestors().skip(1).take(3).filter_map(|p| p.file_name()?.to_str()) {
         if SEASON_DIR.is_match(dir.trim()) || GENERIC.contains(&dir.to_lowercase().as_str()) {
             continue;
@@ -257,7 +264,8 @@ fn finish_episode(path: &Path, prefix: &str, season: Option<u32>, episodes: Vec<
             year = year.or(y);
         }
     }
-    Guess::Episode { show, year, season: season.or_else(|| season_from_dirs(path)), episodes }
+    let season = season.or_else(|| season_from_dirs(path)).or_else(|| season_pack_from_dir(path).map(|(_, _, s)| s));
+    Guess::Episode { show, year, season, episodes }
 }
 
 /// Guess what a file is from its name, falling back to parent folders for context.
@@ -492,6 +500,21 @@ mod tests {
     }
 
     #[test]
+    fn localized_season_pack() {
+        let dir = "/media/torrent/Звёздные Войны Видения. Девятый Джедай (Star Wars Visions Presents - The Ninth Jedi) Сезон 1 1080p";
+        for n in [1, 8] {
+            let path = format!("{dir}/Эпизод {n} - Новая Угроза (A New Threat).mkv");
+            let g = p(&path);
+            assert!(matches!(&g, Guess::Episode { season: Some(1), episodes, .. } if episodes == &vec![n]), "{g:?}");
+            let variants = title_variants(g.title(), Path::new(&path));
+            assert!(variants.iter().any(|v| v == "Star Wars Visions Presents - The Ninth Jedi"), "{variants:?}");
+            assert!(!variants.iter().any(|v| v == "torrent"), "{variants:?}");
+        }
+        assert_eq!(p("/m/Severance/Сезон 2/Серия 03.mkv"), ep("Severance", 2, &[3]));
+        assert_eq!(p("/m/Severance/Сезон: 2/Эпизод 3.mkv"), ep("Severance", 2, &[3]));
+    }
+
+    #[test]
     fn ep_with_part_letter() {
         assert!(matches!(p("/m/Naruto Kai Dub Ep 27B.mp4"), Guess::Episode { ref episodes, .. } if episodes == &vec![27]));
     }
@@ -554,3 +577,4 @@ mod tests {
         assert!(matches!(&batch[1], Guess::Episode { season: Some(2), episodes, .. } if episodes == &vec![2]));
     }
 }
+
