@@ -280,9 +280,10 @@ export async function openPlayer({ fileId, download, title, subtitle, startAt, n
   let seekTries = 0;
   function applyPendingSeek() {
     // On iPhones, native HLS that loads a mid-file segment first keeps re-downloading it and never buffers; once it
-    // has decoded the start of the stream the same seek works, so wait for the first frame there.
-    const ready = state.mode === 'hls' && !state.hls ? 2 : 1;
-    if (pendingSeek === null || video.readyState < ready || video.seeking) return;
+    // has buffered the start of the stream the same seek works, so wait for buffered media there (iOS reports
+    // readyState 2 before anything is buffered).
+    const native = state.mode === 'hls' && !state.hls;
+    if (pendingSeek === null || video.readyState < 1 || video.seeking || (native && !video.buffered.length)) return;
     const early = pendingSeek - video.currentTime;
     if (Math.abs(early) < 3 || (seekTries > 0 && early > 0 && early < 20) || seekTries >= 8) {
       pendingSeek = null;
