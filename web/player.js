@@ -344,7 +344,6 @@ export async function openPlayer({ fileId, download, title, subtitle, startAt, n
         hls.attachMedia(video);
       } else if (caps.nativeHls) {
         video.src = src;
-        video.addEventListener('loadedmetadata', () => { if (position) video.currentTime = position; }, { once: true });
       } else {
         fail('This browser cannot play HLS streams.');
         return true;
