@@ -95,6 +95,10 @@ with the same plan share one session, so the upstream sees one connection. A ses
 request; `DELETE /api/live/{session}` is accepted but does nothing because others may be watching. Stream URLs and
 headers never reach clients. Active sessions appear in `GET /api/hardware` under `live`.
 
+A plugin with live channels should also answer `GET ui/channels` →
+`{ channels: [{ id, name, logo?, groups: [string], number?, favourite?, health?: "up"|"down"|null }], total?, groups?: [{ name, count }] }`
+(`id` is its `stream`), so components outside the declarative views, such as the Jellyfin bridge, can list them.
+
 ## Plugin → Ciniva (service key)
 
 - `POST /api/scan` with optional `{ "paths": ["/media/Downloads/Show.S01E01.mkv"] }`: rescan only those paths (files or folders).
