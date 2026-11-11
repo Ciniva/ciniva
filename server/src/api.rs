@@ -72,6 +72,7 @@ pub fn router(ctx: Shared) -> Router {
         .route("/files/{id}/credits", put(set_credits))
         .merge(crate::account::private_routes())
         .merge(crate::plugins::routes())
+        .merge(crate::live::routes())
         .merge(crate::downloads::routes())
         .layer(middleware::from_fn_with_state(ctx.clone(), auth))
         .merge(crate::account::public_routes());
@@ -674,6 +675,7 @@ async fn hardware(State(ctx): State<Shared>) -> ApiResult<serde_json::Value> {
     Ok(Json(serde_json::json!({
         "devices": ctx.hw.devices,
         "transcodes": ctx.transcoder.active().await,
+        "live": ctx.live.active().await,
     })))
 }
 
@@ -763,7 +765,7 @@ fn byte_range(header: &str, len: usize) -> Option<Result<(usize, usize), ()>> {
 
 /// Segment response that honours Range: Safari on iOS fetches large media segments in byte ranges and loops when
 /// every range comes back as the whole body.
-fn ranged(headers: &axum::http::HeaderMap, ctype: &'static str, bytes: Vec<u8>) -> Response {
+pub fn ranged(headers: &axum::http::HeaderMap, ctype: &'static str, bytes: Vec<u8>) -> Response {
     let base = [(header::CONTENT_TYPE, ctype), (header::CACHE_CONTROL, "no-store"), (header::ACCEPT_RANGES, "bytes")];
     let len = bytes.len();
     match headers.get(header::RANGE).and_then(|v| v.to_str().ok()).and_then(|h| byte_range(h, len)) {

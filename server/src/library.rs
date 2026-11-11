@@ -24,6 +24,7 @@ pub struct Ctx {
     pub cfg: Config,
     pub hw: Arc<Hardware>,
     pub transcoder: Arc<Transcoder>,
+    pub live: Arc<crate::live::Live>,
     pub keyframes: Arc<crate::transcode::Keyframes>,
     scan_lock: Mutex<()>,
     trickplay_lock: Mutex<()>,
@@ -75,12 +76,14 @@ impl Ctx {
         let tmdb = RwLock::new(cfg.tmdb_key.clone().map(|k| Arc::new(Tmdb::new(k, cfg.language.clone()))));
         let keyframes = crate::transcode::Keyframes::new(cfg.ffprobe.clone(), cfg.data_dir.join("keyframes"));
         let transcoder = Transcoder::new(hw.clone(), cfg.data_dir.join("transcode"), keyframes.clone());
+        let live = crate::live::Live::new(hw.clone(), cfg.data_dir.join("live"), cfg.ffprobe.clone());
         Arc::new(Self {
             db,
             tmdb,
             cfg,
             hw,
             transcoder,
+            live,
             keyframes,
             scan_lock: Mutex::new(()),
             trickplay_lock: Mutex::new(()),

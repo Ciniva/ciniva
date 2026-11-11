@@ -53,6 +53,8 @@ export function icon(name) {
     prev: 'M18 5v14l-9-7zM7 5H5v14h2z',
     list: 'M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01',
     refresh: 'M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7',
+    tv: 'M3 7h18v12H3zM8 3l4 4 4-4',
+    star: 'M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z',
     credits: 'M4 5h16v14H4zM8 9h8M8 12h8M8 15h5',
     download: 'M12 4v11M7 10l5 5 5-5M5 20h14',
   };

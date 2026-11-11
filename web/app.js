@@ -551,8 +551,8 @@ async function settingsView(el) {
           h('td', d.max_sessions > 1000 ? `${d.active}` : `${d.active} / ${d.max_sessions}`),
         ))),
       )),
-      hw.transcodes.length
-        ? h('div', h('h3', 'Active streams'), h('ul.plain', hw.transcodes.map((t) => h('li', t.plan.remux ? `File ${t.file_id}: direct stream, ${t.plan.codec.toUpperCase()} copied (no transcoding)` : `File ${t.file_id}: ${t.plan.codec.toUpperCase()} on ${t.plan.device}${t.plan.tonemap ? ', tone map ' + t.plan.tonemap : ''}`))))
+      hw.transcodes.length || hw.live?.length
+        ? h('div', h('h3', 'Active streams'), h('ul.plain', (hw.live || []).map((l) => h('li', `Live: ${l.title} · ${l.plan.remux ? `${l.plan.codec.toUpperCase()} copied` : `H.264 on ${l.plan.device}`}`)), hw.transcodes.map((t) => h('li', t.plan.remux ? `File ${t.file_id}: direct stream, ${t.plan.codec.toUpperCase()} copied (no transcoding)` : `File ${t.file_id}: ${t.plan.codec.toUpperCase()} on ${t.plan.device}${t.plan.tonemap ? ', tone map ' + t.plan.tonemap : ''}`))))
         : h('p.muted', 'No active streams.'),
     ),
     h('section.panel',

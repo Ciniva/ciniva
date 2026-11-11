@@ -128,6 +128,22 @@ services:
     pids_limit: 256
     networks: [default, plugins]
 
+  # Live TV from M3U playlists. Needs the internet (playlists, channel checks), so it also joins the default network.
+  ciniva-iptv:
+    image: ghcr.io/ciniva/ciniva-plugin-iptv:latest
+    container_name: ciniva-iptv
+    restart: unless-stopped
+    profiles: [tv]
+    <<: *hardening
+    environment:
+      CINIVA_URL: http://ciniva-internal:8484
+      CINIVA_PLUGIN_SECRET: ${CINIVA_PLUGIN_SECRET}
+      PLUGIN_URL: http://ciniva-iptv:8091
+    volumes:
+      - ./data/iptv:/data
+    pids_limit: 128
+    networks: [default, plugins]
+
 networks:
   # Internal only. qBittorrent lets this subnet use its API without a password
   # (Web UI → "Bypass authentication for clients in whitelisted IP subnets": 172.31.250.0/24).

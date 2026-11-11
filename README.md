@@ -78,6 +78,10 @@ the service key, so a compromised plugin can reach Ciniva's API and nothing else
   ("download in order"), per-file priorities, Prowlarr search ranked by your preferred quality, languages and size,
   and "Find episodes"/"Find releases" on show, season and movie pages. When a download finishes it rescans just that
   folder (it appears within seconds) and notifies signed-in clients.
+- [ciniva-plugin-iptv](https://github.com/Ciniva/ciniva-plugin-iptv): Live TV from M3U playlists (iptv-org's free lists or your provider's):
+  channels by group, search, favourites and a check that marks channels that don't respond. Ciniva relays the streams
+  (copying them when the client can play them, re-encoding on a GPU otherwise) and shares one upstream connection
+  between viewers. It needs internet access, unlike the other plugins.
 - [ciniva-plugin-jellyfin](https://github.com/Ciniva/ciniva-plugin-jellyfin): a Jellyfin-compatible API on port 8096 so Jellyfin apps (Android TV, webOS, Tizen, Roku), Swiftfin,
   Infuse and Findroid can browse, play and sync progress. Add the server as `http://<server>:8096` and sign in with your
   Ciniva account.

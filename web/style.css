@@ -364,6 +364,8 @@ button.ep-item:hover { background: rgba(255,255,255,.07); }
 .plugin-item.clickable { cursor: pointer; }
 .plugin-item.clickable:hover { border-color: var(--muted); }
 .plugin-item-img { width: 46px; height: 69px; object-fit: cover; border-radius: 5px; }
+.plugin-item-img.logo { width: 72px; height: 46px; object-fit: contain; padding: 4px; background: rgba(255,255,255,.06); display: grid; place-items: center; }
+.plugin-item-img.logo .icon { width: 22px; height: 22px; opacity: .6; }
 .plugin-item-body { min-width: 0; display: grid; gap: 6px; grid-column: 2; }
 .plugin-item:not(:has(.plugin-item-img)) .plugin-item-body { grid-column: 1 / 3; }
 .plugin-item-title { font-weight: 650; overflow-wrap: anywhere; }
@@ -384,3 +386,7 @@ button.ep-item:hover { background: rgba(255,255,255,.07); }
 .seek-downloaded { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(255,255,255,.14); }
 .download-art { aspect-ratio: 16 / 9; display: grid; place-items: center; align-content: center; gap: 6px; color: var(--accent); background: linear-gradient(135deg, var(--surface-2), var(--bg-2)); font-weight: 700; }
 .download-art .icon { width: 34px; height: 34px; }
+
+.live-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; background: #e5383b; color: #fff; font-size: 11px; font-weight: 700; letter-spacing: .06em; }
+.live-logo { width: 56px; height: 36px; object-fit: contain; }
+.player.live .player-bottom { padding-top: 60px; }

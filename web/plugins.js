@@ -1,5 +1,6 @@
 import { api, img } from './api.js';
 import { h, icon, toast, modal } from './dom.js';
+import { openLive } from './live.js';
 
 let cache = null;
 
@@ -82,8 +83,13 @@ function navigate(pluginId, nav) {
   location.hash = `#/plugin/${pluginId}/${nav.page}${qs ? '?' + qs : ''}`;
 }
 
+function play(ctx, p, siblings) {
+  openLive({ plugin: ctx.pluginId, stream: p.stream, title: p.title, image: p.image, channels: siblings });
+}
+
 async function perform(action, ctx, extraBody) {
   if (action.confirm && !confirm(action.confirm)) return;
+  if (action.play) return play(ctx, action.play);
   if (action.navigate) return navigate(ctx.pluginId, action.navigate);
   if (!action.call) return;
   try {
@@ -127,9 +133,12 @@ function renderBlock(b, ctx) {
 function renderList(b, ctx) {
   const items = b.items || [];
   if (!items.length) return h('div.empty.plugin-empty', h('p', b.empty || 'Nothing here.'));
+  const channels = items.filter((it) => it.play).map((it) => ({ stream: it.play.stream, title: it.play.title || it.title, image: it.image }));
   return h('div.plugin-list', items.map((it) => {
-    const row = h('div.plugin-item' + (it.link ? '.clickable' : ''),
-      it.image ? h('img.plugin-item-img', { src: it.image.startsWith('/') && !it.image.startsWith('/api/') ? img(it.image, 'w185') : it.image, alt: '', loading: 'lazy' }) : null,
+    const row = h('div.plugin-item' + (it.link || it.play ? '.clickable' : '') + (it.play ? '.playable' : ''),
+      it.play && !it.image ? h('div.plugin-item-img.logo', icon('tv')) : null,
+      it.image ? h('img.plugin-item-img' + (it.play ? '.logo' : ''), {
+        onerror: (e) => { if (it.play) e.target.replaceWith(h('div.plugin-item-img.logo', icon('tv'))); else e.target.style.visibility = 'hidden'; }, src: it.image.startsWith('/') && !it.image.startsWith('/api/') ? img(it.image, 'w185') : it.image, alt: '', loading: 'lazy' }) : null,
       h('div.plugin-item-body',
         h('div.plugin-item-title', it.title),
         it.subtitle ? h('div.plugin-item-sub', it.subtitle) : null,
@@ -138,7 +147,8 @@ function renderList(b, ctx) {
       ),
       it.actions?.length ? h('div.plugin-item-actions', it.actions.map((a) => actionButton(a, ctx, true))) : null,
     );
-    if (it.link) row.addEventListener('click', () => navigate(ctx.pluginId, it.link));
+    if (it.play) row.addEventListener('click', () => play(ctx, { title: it.title, image: it.image, ...it.play }, channels));
+    else if (it.link) row.addEventListener('click', () => navigate(ctx.pluginId, it.link));
     return row;
   }));
 }

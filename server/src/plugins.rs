@@ -219,6 +219,35 @@ async fn forward(
     Ok((status, [(axum::http::header::CONTENT_TYPE, ctype)], Body::from(bytes)).into_response())
 }
 
+/// Ask a plugin where stream `stream` lives (`GET ui/streams/{stream}`); the answer never reaches clients.
+pub async fn resolve_stream(ctx: &Shared, pid: &str, stream: &str, id: &Identity) -> Result<crate::live::Source, ApiError> {
+    let url = ctx
+        .plugins
+        .read()
+        .await
+        .get(pid)
+        .filter(|l| l.last_seen.elapsed() < OFFLINE_AFTER)
+        .map(|l| l.url.clone())
+        .ok_or_else(|| ApiError(StatusCode::SERVICE_UNAVAILABLE, format!("plugin {pid} is not running")))?;
+    let (user, admin) = match id {
+        Identity::User(u) => (u.username.clone(), u.admin),
+        Identity::Service => ("service".to_string(), true),
+    };
+    let resp = HTTP
+        .get(format!("{url}/ui/streams/{stream}"))
+        .header("X-Ciniva-Secret", ctx.cfg.plugin_secret.clone().unwrap_or_default())
+        .header("X-Ciniva-User", user)
+        .header("X-Ciniva-Admin", if admin { "1" } else { "0" })
+        .send()
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("plugin {pid}: {e}")))?;
+    if !resp.status().is_success() {
+        let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        return Err(ApiError(status, format!("plugin {pid} has no stream {stream}")));
+    }
+    resp.json().await.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("plugin {pid}: bad stream answer: {e}")))
+}
+
 #[derive(Deserialize)]
 struct Notification {
     title: String,

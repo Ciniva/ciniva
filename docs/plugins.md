@@ -45,6 +45,7 @@ Conventional paths:
 
 - `GET ui/pages/{page}?…` → `View`
 - `POST ui/actions/{action}` with `{ "context": Context }` → `Result`
+- `GET ui/streams/{stream}` → `Stream` (only for plugins that offer live streams; Ciniva calls it, never a client)
 - anything a `Call` names → `Result`
 
 `Context` for actions: `{ "kind": "show"|"season"|"movie", "id": <ciniva id>, "tmdb_id", "title", "year", "season"?, "missing"?: [{ "season", "episode", "title" }] }`
@@ -58,8 +59,10 @@ Block   = { type: "text",    text, tone? }
         | { type: "actions", items: [Action] }
         | { type: "form",    id?, fields: [Field], submit: { label, call: Call } }
         | { type: "list",    id?, items: [Item], empty?: string }
-Item    = { id, title, subtitle?, image?, progress?: 0..1, badges?: [{ text, tone? }], actions?: [Action], link?: Nav }
-Action  = { label, icon?, tone?: "primary"|"danger"|"default", confirm?: string, call?: Call, navigate?: Nav }
+Item    = { id, title, subtitle?, image?, progress?: 0..1, badges?: [{ text, tone? }], actions?: [Action], link?: Nav, play?: Play }
+Action  = { label, icon?, tone?: "primary"|"danger"|"default", confirm?: string, call?: Call, navigate?: Nav, play?: Play }
+Play    = { stream, title? }
+Stream  = { url, title?, image?, user_agent?, referrer?, headers?: { name: value } }
 Nav     = { page, params?: { … } }
 Call    = { method: "GET"|"POST"|"PUT"|"DELETE", path, body?: { … } }
 Field   = { name, label, kind: "text"|"password"|"number"|"select"|"toggle"|"file"|"textarea",
@@ -72,8 +75,25 @@ tone    = "info" | "success" | "warning" | "error"
 - Form submit sends `call.body` merged with the field values. A `file` field is sent as
   `{ "name": "<file name>", "data_base64": "…" }`.
 - `View.refresh` asks the client to re-fetch the page every N seconds while it is visible (live progress).
+- `play` opens the client's live player for `stream`, an id the plugin chooses (letters, digits, `-`, `_`, `.`).
+  An item with `play` plays when selected; clients offer the other `play` items of the same list as channel up/down.
 - After a `Result`: show `message` as a toast, then replace the view with `view`, or go to `navigate`, or re-fetch the
   current page when `refresh` is true.
+
+## Live streams
+
+When a client plays a `Play`, it calls `POST /api/plugins/{id}/live/{stream}` on Ciniva with the same body as a file
+transcode (`max_height`, `bitrate_kbps`, `video_copy`, `audio_copy`, `audio_channels`, `container`). Ciniva asks the
+plugin for `GET ui/streams/{stream}`, probes the URL and starts ffmpeg writing a rolling HLS playlist (4 s segments,
+the last 8 kept). Video is copied when the client lists its codec in `video_copy` and the height fits, otherwise
+re-encoded to H.264 on a GPU; audio is copied when listed in `audio_copy`, otherwise AAC stereo. Segments are MPEG-TS
+for H.264 (and when `container` asks for `ts`), fMP4 otherwise.
+
+The answer is `{ session, playlist: "/api/live/{session}/index.m3u8", plan, live: true, title, image }`. The playlist
+has no end and no seeking; append `?token=` for players that can't send headers. Viewers asking for the same stream
+with the same plan share one session, so the upstream sees one connection. A session ends 45 s after its last
+request; `DELETE /api/live/{session}` is accepted but does nothing because others may be watching. Stream URLs and
+headers never reach clients. Active sessions appear in `GET /api/hardware` under `live`.
 
 ## Plugin → Ciniva (service key)
 

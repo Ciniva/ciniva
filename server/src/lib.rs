@@ -7,6 +7,7 @@ pub mod downloads;
 pub mod hwaccel;
 pub mod index;
 pub mod library;
+pub mod live;
 pub mod parser;
 pub mod plugins;
 pub mod probe;

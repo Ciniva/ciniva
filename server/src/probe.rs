@@ -102,9 +102,15 @@ fn tag(tags: &std::collections::HashMap<String, String>, key: &str) -> Option<St
 }
 
 pub async fn probe(ffprobe: &str, path: &Path) -> Result<MediaInfo> {
+    probe_input(ffprobe, &[], path.as_os_str()).await
+}
+
+/// Probe any ffmpeg input (a file or a URL); `extra` goes before the input (timeouts, HTTP headers).
+pub async fn probe_input(ffprobe: &str, extra: &[String], input: &std::ffi::OsStr) -> Result<MediaInfo> {
     let out = tokio::process::Command::new(ffprobe)
         .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
-        .arg(path)
+        .args(extra)
+        .arg(input)
         .kill_on_drop(true)
         .output()
         .await?;
