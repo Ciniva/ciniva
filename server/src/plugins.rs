@@ -165,9 +165,13 @@ async fn put_settings(
         next.insert(k, v);
     }
     sqlx::query("UPDATE plugins SET settings = ? WHERE id = ?").bind(Value::Object(next).to_string()).bind(&pid).execute(&ctx.db).await?;
-    if let Some(url) = ctx.plugins.read().await.get(&pid).map(|l| l.url.clone()) {
+    let url = ctx.plugins.read().await.get(&pid).map(|l| l.url.clone());
+    if let Some(url) = url {
+        // The plugin re-registers to fetch its settings, so don't hold the save open (or any lock) for its answer.
         let secret = ctx.cfg.plugin_secret.clone().unwrap_or_default();
-        let _ = HTTP.post(format!("{url}/settings-changed")).header("X-Ciniva-Secret", secret).send().await;
+        tokio::spawn(async move {
+            let _ = HTTP.post(format!("{url}/settings-changed")).header("X-Ciniva-Secret", secret).send().await;
+        });
     }
     Ok(StatusCode::NO_CONTENT)
 }
