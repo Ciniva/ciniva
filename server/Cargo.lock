@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "ciniva"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "argon2",
