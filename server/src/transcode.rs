@@ -518,7 +518,7 @@ impl Keyframes {
     }
 }
 
-/// Where a session's keyframe times come from: the library's cache/index, or supplied by the caller (downloads,
+/// Where a session's keyframe times come from: the library's cache/index, or supplied by the caller (files still downloading,
 /// which read the index of the partial file; `None` means transcode instead of remux).
 pub enum KeyframeSource {
     Library,

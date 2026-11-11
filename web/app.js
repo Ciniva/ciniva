@@ -243,7 +243,7 @@ function hero(backdrop, ...content) {
 }
 
 async function homeView(el) {
-  const [home, downloads] = await Promise.all([api('/home'), api('/downloads').catch(() => [])]);
+  const home = await api('/home');
   const featured = [...home.recent_movies, ...home.recent_shows].filter((x) => x.backdrop_path);
   const pick = featured[Math.floor(Math.random() * Math.min(featured.length, 8))];
   if (pick) {
@@ -256,7 +256,6 @@ async function homeView(el) {
     ));
   }
   append(el, 
-    row('Downloading', downloads.map(downloadCard)),
     row('Continue watching', home.continue_watching.map(continueCard)),
     row('Recently added movies', home.recent_movies.map(movieCard), '#/movies?sort=added'),
     row('Recently added shows', home.recent_shows.map(showCard), '#/shows?sort=added'),
@@ -264,20 +263,6 @@ async function homeView(el) {
   if (!home.recent_movies.length && !home.recent_shows.length) {
     append(el, h('div.empty', h('h2', 'Your library is empty'), h('p', 'Add files to the media folder and run a scan from ', h('a', { href: '#/settings' }, 'Settings'), '.')));
   }
-}
-
-function downloadCard(d) {
-  const pct = Math.floor(d.progress * 100);
-  const ready = d.playable;
-  const play = () => ready
-    ? openPlayer({ download: d.id, title: d.title, subtitle: [d.subtitle, `Downloading · ${pct}%`].filter(Boolean).join(' · '), startAt: 0 })
-    : toast('Not enough has downloaded yet; try again in a minute.');
-  const watchable = d.available_secs ? `${clock(d.available_secs)} ready` : 'starting';
-  return h('button.wide-card.download-card', { onclick: play, title: d.name },
-    h('div.wide-art', h('div.download-art', icon('download'), h('span', `${pct}%`)), ready ? h('span.play-overlay', icon('play')) : null, progressBar(d.progress)),
-    h('div.card-title', [d.title, d.subtitle].filter(Boolean).join(' · ')),
-    h('div.card-sub', ready ? `Watch now · ${watchable}` : `Downloading ${pct}% · ${watchable}`),
-  );
 }
 
 function continueCard(c) {

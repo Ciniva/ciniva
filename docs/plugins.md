@@ -20,7 +20,7 @@ renders the screens they describe. Every client (web, macOS, Windows) draws the 
   "id": "qbittorrent",
   "name": "qBittorrent",
   "version": "0.1.0",
-  "description": "Downloads, search and Download & watch",
+  "description": "Downloads and search",
   "icon": "download",
   "url": "http://ciniva-qbittorrent:8090",
   "settings": [Field],
@@ -103,9 +103,11 @@ A plugin with live channels should also answer `GET ui/channels` →
 
 - `POST /api/scan` with optional `{ "paths": ["/media/Downloads/Show.S01E01.mkv"] }`: rescan only those paths (files or folders).
 - `POST /api/notifications` with `{ "title", "body"?, "tone"? }`: shown to signed-in clients.
-- `POST /api/downloads/report` with `{ "plugin", "items": [{ "id", "title", "path", "size", "ranges": [[start, end], …], "progress" }] }`:
-  files that can be watched while downloading. `path` is the partial file inside a media folder, `ranges` are the
-  byte ranges already on disk. Report every few seconds; an item disappears 60 s after its last report.
+- `POST /api/downloads/report` with `{ "plugin", "items": [{ "path", "size", "ranges": [[start, end], …] }] }`: files
+  that are still downloading. `path` is the file inside a media folder (a trailing `.!qB` is ignored), `size` its final
+  size and `ranges` the byte ranges already on disk. Library streams of these files wait for missing bytes, the scanner
+  leaves them alone until they finish, and a folder Ciniva doesn't know yet is scanned right away. Report every few
+  seconds, replacing the previous report; an item is forgotten 60 s after its last report.
 - All library endpoints (`/api/shows/{id}`, `/api/shows/{id}/seasons/{n}`, `/api/search`, …).
 
 ## Clients

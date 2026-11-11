@@ -123,19 +123,17 @@ function askResume(saved, duration) {
   });
 }
 
-export async function openPlayer({ fileId, download, title, subtitle, startAt, next, reuseHistory, showId }) {
+export async function openPlayer({ fileId, title, subtitle, startAt, next, reuseHistory, showId }) {
   if (showId && !next) next = () => episodes.neighbour(showId, fileId, 1);
-  const base = download ? `/downloads/${download}` : `/files/${fileId}`;
+  const base = `/files/${fileId}`;
   const file = await api(base);
   if (!file.probe) {
-    toast(download ? 'Not enough has downloaded yet to start playing.' : 'This file has not been analysed yet. Try again after the scan finishes.', 'error');
+    toast('This file has not been analysed yet. Try again after the scan finishes.', 'error');
     return;
   }
   const probe = file.probe;
   const duration = file.duration || probe.duration || 0;
-  // While downloading, only the part already on disk can be played or seeked into.
-  let availableSecs = download ? file.available_secs ?? 0 : null;
-  let start = download ? startAt ?? 0 : startAt;
+  let start = startAt;
   if (start === undefined) {
     const saved = !file.watched && file.position_ms ? file.position_ms / 1000 : 0;
     start = saved >= 30 && (!duration || saved < duration - 15) ? await askResume(saved, duration) : 0;
@@ -158,8 +156,7 @@ export async function openPlayer({ fileId, download, title, subtitle, startAt, n
   const buffered = h('div.seek-buffered');
   const knob = h('div.seek-knob');
   const trick = h('div.trick', h('div.trick-img'), h('div.trick-time'));
-  const downloaded = h('div.seek-downloaded');
-  const seek = h('div.seek', { role: 'slider', 'aria-label': 'Seek' }, h('div.seek-track', downloaded, buffered, played), knob, trick);
+  const seek = h('div.seek', { role: 'slider', 'aria-label': 'Seek' }, h('div.seek-track', buffered, played), knob, trick);
   const time = h('span.time');
   const playBtn = h('button.ctl', { 'aria-label': 'Play' }, icon('play'));
   const prevBtn = showId ? h('button.ctl', { 'aria-label': 'Previous episode', title: 'Previous episode (⇧P)', disabled: true }, icon('prev')) : null;
@@ -204,7 +201,7 @@ export async function openPlayer({ fileId, download, title, subtitle, startAt, n
         h('div.spacer'),
         listBtn,
         probe.audio.length > 1 ? audioSelect : null,
-        !download && probe.subtitles.length ? subSelect : null,
+        probe.subtitles.length ? subSelect : null,
         qualitySelect,
         muteBtn,
         volume,
@@ -369,7 +366,7 @@ export async function openPlayer({ fileId, download, title, subtitle, startAt, n
   let lastReport = 0;
   function report(force) {
     const t = video.currentTime;
-    if (download || !total() || t < 1 || pendingSeek !== null || state.closed && !force) return Promise.resolve();
+    if (!total() || t < 1 || pendingSeek !== null || state.closed && !force) return Promise.resolve();
     if (!force && Date.now() - lastReport < 10000) return Promise.resolve();
     lastReport = Date.now();
     return api(`/files/${fileId}/progress`, { method: 'PUT', keepalive: true, body: { position_ms: Math.floor(t * 1000), duration_ms: Math.floor(total() * 1000) } }).catch(() => {});
@@ -383,20 +380,18 @@ export async function openPlayer({ fileId, download, title, subtitle, startAt, n
     let end = 0;
     for (let i = 0; i < video.buffered.length; i++) if (video.buffered.start(i) <= t + 1) end = Math.max(end, video.buffered.end(i));
     buffered.style.width = d ? `${(end / d) * 100}%` : '0';
-    downloaded.style.width = availableSecs !== null && d ? `${Math.min(100, (availableSecs / d) * 100)}%` : '0';
     time.textContent = `${clock(t)} / ${clock(d)}`;
   }
 
   function seekTo(t) {
     const d = total();
-    if (availableSecs !== null) t = Math.min(t, Math.max(0, availableSecs - 10));
     video.currentTime = Math.max(0, Math.min(d ? d - 0.5 : t, t));
     render();
     poke();
   }
 
   let trickplay = null;
-  if (!download) api(`/files/${fileId}/trickplay`).then((m) => { trickplay = m; }).catch(() => {});
+  api(`/files/${fileId}/trickplay`).then((m) => { trickplay = m; }).catch(() => {});
 
   function preview(fraction) {
     const d = total();
@@ -498,7 +493,7 @@ export async function openPlayer({ fileId, download, title, subtitle, startAt, n
       recover();
       return;
     }
-    if (!download) api(`/files/${fileId}/progress`, { method: 'PUT', body: { position_ms: Math.floor(total() * 1000), duration_ms: Math.floor(total() * 1000) } }).catch(() => {});
+    api(`/files/${fileId}/progress`, { method: 'PUT', body: { position_ms: Math.floor(total() * 1000), duration_ms: Math.floor(total() * 1000) } }).catch(() => {});
     if (!upNextTimer) showUpNext(false);
   });
   muteBtn.addEventListener('click', () => { video.muted = !video.muted; });
@@ -536,7 +531,7 @@ export async function openPlayer({ fileId, download, title, subtitle, startAt, n
     if (!n) {
       if (!atCredits) return;
       const skip = () => {
-        if (!download) api(`/files/${fileId}/progress`, { method: 'PUT', keepalive: true, body: { position_ms: Math.floor(total() * 1000), duration_ms: Math.floor(total() * 1000) } }).catch(() => {});
+        api(`/files/${fileId}/progress`, { method: 'PUT', keepalive: true, body: { position_ms: Math.floor(total() * 1000), duration_ms: Math.floor(total() * 1000) } }).catch(() => {});
         hideUpNext();
         close();
       };
@@ -681,20 +676,6 @@ export async function openPlayer({ fileId, download, title, subtitle, startAt, n
     } catch (e) {
       panel.replaceChildren(h('div.error', `Could not load episodes: ${e.message}`));
     }
-  }
-
-  if (download) {
-    const poll = setInterval(async () => {
-      if (state.closed) return clearInterval(poll);
-      try {
-        const d = await api(base);
-        availableSecs = d.available_secs ?? availableSecs;
-      } catch {
-        availableSecs = null;
-        clearInterval(poll);
-      }
-      render();
-    }, 5000);
   }
 
   document.addEventListener('keydown', onKey);

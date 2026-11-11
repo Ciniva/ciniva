@@ -30,7 +30,7 @@ pub struct Ctx {
     trickplay_lock: Mutex<()>,
     credits_lock: Mutex<()>,
     pub setup_lock: Mutex<()>,
-    pub downloads: crate::downloads::Store,
+    pub partial: crate::partial::Store,
     /// Lets the server read its own endpoints (ffmpeg pulling a download stream); never leaves the process.
     pub internal_token: String,
     pub events: tokio::sync::broadcast::Sender<(String, serde_json::Value)>,
@@ -89,7 +89,7 @@ impl Ctx {
             trickplay_lock: Mutex::new(()),
             credits_lock: Mutex::new(()),
             setup_lock: Mutex::new(()),
-            downloads: Default::default(),
+            partial: Default::default(),
             internal_token: crate::auth::random_token(),
             events: tokio::sync::broadcast::channel(64).0,
             plugins: Default::default(),
@@ -207,6 +207,10 @@ pub async fn credits_pass(ctx: &Arc<Ctx>) {
     for (id, path, duration, show, season, episode, version) in episodes {
         seasons.entry((show, season)).or_default().push((id, path, duration, episode, version));
     }
+    let downloading = ctx.partial.paths().await;
+    for eps in seasons.values_mut() {
+        eps.retain(|e| !downloading.contains(std::path::Path::new(&e.1)));
+    }
     for eps in seasons.values() {
         if eps.iter().all(|e| e.4 >= crate::credits::VERSION) {
             continue;
@@ -261,6 +265,9 @@ pub async fn credits_pass(ctx: &Arc<Ctx>) {
     .unwrap_or_default();
     for (id, path, duration) in movies {
         let path = std::path::Path::new(&path);
+        if downloading.contains(path) {
+            continue;
+        }
         let marker = match crate::credits::from_chapters(ffprobe, path, duration).await {
             Some(m) => Some(m),
             None => picture_credits(ctx, id, path, duration, 60).await,
@@ -310,7 +317,11 @@ pub async fn trickplay_pass(ctx: &Arc<Ctx>) {
         Ok(f) => f,
         Err(e) => return tracing::warn!("trickplay query failed: {e:#}"),
     };
+    let downloading = ctx.partial.paths().await;
     for (id, path, media) in files {
+        if downloading.contains(std::path::Path::new(&path)) {
+            continue;
+        }
         let video = media.video.as_ref();
         if video.is_some_and(|v| crate::transcode::REMUX_CODECS.contains(&v.codec.as_str()) && v.dolby_vision_profile != Some(5)) {
             if let Err(e) = ctx.keyframes.extract(id, std::path::Path::new(&path), media.duration.unwrap_or(0.0)).await {
@@ -363,10 +374,15 @@ async fn scan_inner(ctx: &Arc<Ctx>, scope: Option<Vec<PathBuf>>) -> Result<ScanR
         }
     }
     let is_disc_extra = |path: &PathBuf| parser::disc_root(path).is_some_and(|root| disc_main.get(root).is_some_and(|(main, _)| *main != path));
+    let downloading = ctx.partial.paths().await;
     let mut tx = ctx.db.begin().await?;
     let mut stale = Vec::new();
     for ((path, size, mtime), guess) in found.iter().zip(&guesses) {
         let key = path.to_string_lossy().into_owned();
+        // A downloading file changes on every scan; it is re-read once, when it is complete.
+        if downloading.contains(path) && existing.contains_key(&key) {
+            continue;
+        }
         let guess_json = serde_json::to_string(guess)?;
         let kind = if parser::is_extra(path) || is_disc_extra(path) { "extra" } else { "pending" };
         match existing.get(&key) {

@@ -73,7 +73,7 @@ pub fn router(ctx: Shared) -> Router {
         .merge(crate::account::private_routes())
         .merge(crate::plugins::routes())
         .merge(crate::live::routes())
-        .merge(crate::downloads::routes())
+        .merge(crate::partial::routes())
         .layer(middleware::from_fn_with_state(ctx.clone(), auth))
         .merge(crate::account::public_routes());
 
@@ -579,6 +579,9 @@ async fn stream(State(ctx): State<Shared>, Path(id): Path<i64>, req: Request) ->
         Some("avi") => "video/x-msvideo",
         _ => "application/octet-stream",
     };
+    if let Some(resp) = crate::partial::serve(&ctx, std::path::Path::new(&path), mime, req.headers()).await {
+        return resp;
+    }
     let mut resp = ServeFile::new_with_mime(&path, &mime.parse().unwrap())
         .oneshot(req)
         .await
@@ -690,7 +693,20 @@ async fn start_session(ctx: &Shared, id: i64, request: crate::transcode::Request
     let (path, probe): (String, Option<SqlJson<MediaInfo>>) =
         sqlx::query_as("SELECT path, probe FROM files WHERE id = ?").bind(id).fetch_optional(&ctx.db).await?.ok_or_else(not_found)?;
     let media = probe.ok_or_else(|| ApiError(StatusCode::CONFLICT, "file has not been probed yet".into()))?.0;
-    Ok(ctx.transcoder.start(id, path.into(), media, request).await?)
+    if !ctx.partial.contains(std::path::Path::new(&path)).await {
+        return Ok(ctx.transcoder.start(id, path.into(), media, request).await?);
+    }
+    // ffmpeg reads a downloading file through the library stream so it waits for missing data. Keyframes come straight
+    // from the container index (in-order downloads fetch it first) and aren't cached, since the file is incomplete.
+    let duration = media.duration.unwrap_or(0.0);
+    let index_path = std::path::PathBuf::from(&path);
+    let keyframes = tokio::task::spawn_blocking(move || crate::index::keyframes(&index_path))
+        .await
+        .ok()
+        .flatten()
+        .filter(|k| crate::index::usable(k, duration));
+    let input = format!("http://127.0.0.1:{}/api/files/{id}/stream?token={}", ctx.cfg.port, ctx.internal_token);
+    Ok(ctx.transcoder.start_with(id, input.into(), media, request, crate::transcode::KeyframeSource::Known(keyframes)).await?)
 }
 
 async fn transcode_start(

@@ -93,8 +93,9 @@ qBittorrent and Prowlarr run in their own containers built from pinned, checksum
 [prowlarr](https://github.com/Ciniva/prowlarr) the Prowlarr one), unprivileged and with read-only root filesystems:
 
 - qBittorrent sees the library read-only, so it can keep seeding existing torrents but cannot alter or delete them.
-  It can write only to `Downloads`, which Ciniva also scans. Incomplete files carry the `.!qB` extension, so Ciniva
-  never imports a half-downloaded file.
+  It can write only to `Downloads`, which Ciniva also scans. Episodes and movies show up in the library as soon as
+  they start downloading; playing one waits for the parts that haven't arrived yet (the qBittorrent plugin reports
+  them), and Ciniva analyses the file again once it is complete.
 - qBittorrent lets the internal network use its API without a password (for the plugin); its Web UI on port 8080 still
   needs your login. Prowlarr's Web UI (port 9696) asks for a login on first visit; add your trackers there.
 
