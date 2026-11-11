@@ -34,8 +34,8 @@ export function openLive({ plugin, stream, title, image, channels }) {
   const playBtn = h('button.ctl', { 'aria-label': 'Pause' }, icon('pause'));
   const muteBtn = h('button.ctl', { 'aria-label': 'Mute' }, icon(video.muted ? 'mute' : 'volume'));
   const volume = h('input.volume', { type: 'range', min: 0, max: 1, step: 0.05, value: video.muted ? 0 : video.volume, 'aria-label': 'Volume' });
-  const prevBtn = h('button.ctl', { 'aria-label': 'Previous channel', title: 'Previous channel (↑)', disabled: list.length < 2 }, icon('prev'));
-  const nextBtn = h('button.ctl', { 'aria-label': 'Next channel', title: 'Next channel (↓)', disabled: list.length < 2 }, icon('next'));
+  const prevBtn = h('button.ctl', { 'aria-label': 'Previous channel', title: 'Previous channel (↓)', disabled: list.length < 2 }, icon('prev'));
+  const nextBtn = h('button.ctl', { 'aria-label': 'Next channel', title: 'Next channel (↑)', disabled: list.length < 2 }, icon('next'));
   const root = h('div.player.live.loading',
     video,
     h('div.player-top',
@@ -140,7 +140,7 @@ export function openLive({ plugin, stream, title, image, channels }) {
     if (e.target.closest?.('input, select, textarea')) return;
     const keys = {
       ' ': toggle, k: toggle, Escape: () => close(), f: fullscreen, m: () => { video.muted = !video.muted; },
-      ArrowUp: () => zap(-1), ArrowDown: () => zap(1), PageUp: () => zap(-1), PageDown: () => zap(1),
+      ArrowUp: () => zap(1), ArrowDown: () => zap(-1), PageUp: () => zap(1), PageDown: () => zap(-1),
     };
     const fn = keys[e.key];
     if (fn) { e.preventDefault(); fn(); poke(); }
